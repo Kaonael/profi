@@ -1,0 +1,72 @@
+[package]
+name = "profi"
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Nikita Sukharev <kaonael@gmail.com>"]
+
+[dependencies]
+libbpf-rs = "0.26.2"
+libbpf-sys = { version = "1.7", features = ["vendored"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+log = "0.4"
+env_logger = "0.11"
+tokio = { version = "1", features = ["full"] }
+bytes = "1"
+libc = "0.2"
+prometheus = "0.13"
+axum = "0.7"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = "0.23"
+rustls-pemfile = "2"
+rustls-pki-types = "1"
+tokio-rustls = "0.26"
+sha2 = "0.10"
+moka = { version = "0.12", features = ["future"] }
+
+# Performance
+arc-swap = "1"
+rustc-hash = "2"
+lru = "0.12"
+arrayvec = "0.7"
+lasso = { version = "0.7", features = ["multi-threaded"] }
+
+# JSON serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ELF symbol parsing
+object = { version = "0.36", default-features = false, features = ["read", "elf"] }
+
+# NVML GPU hardware monitoring
+nvml-wrapper = "0.12"
+
+# K8s pod enrichment
+kube = { version = "0.95", features = ["client", "runtime"] }
+k8s-openapi = { version = "0.23", features = ["v1_30"] }
+futures = "0.3"
+
+# OpenTelemetry OTLP exporter (always built in; activated at runtime when endpoint is set)
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["metrics", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", default-features = false, features = ["metrics", "grpc-tonic", "http-proto", "reqwest-blocking-client", "tls", "tls-roots"] }
+tonic = { version = "0.12", features = ["tls-native-roots"] }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1"
+opentelemetry-proto = { version = "0.27", features = ["gen-tonic", "metrics"] }
+prost = "0.13"
+async-trait = "0.1"
+rcgen = "0.13"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots"] }
+tempfile = "3"
+
+[build-dependencies]
+libbpf-cargo = "0.26.2"
+libbpf-sys = { version = "1.7", features = ["vendored"] }
+
+[[bench]]
+name = "event_processing"
+harness = false

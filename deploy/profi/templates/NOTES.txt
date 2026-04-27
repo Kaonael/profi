@@ -1,0 +1,75 @@
+profi {{ .Chart.AppVersion }} (chart {{ .Chart.Version }}) has been installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+────────────────────────────────────────────────────────────────────────
+  1. Verify pods are running (one per GPU node matching nvidia.com/gpu.present=true):
+
+     kubectl -n {{ .Release.Namespace }} rollout status daemonset/{{ include "profi.fullname" . }} --timeout=120s
+     kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/name={{ include "profi.name" . }} -o wide
+
+  2. Check readiness + health (once pods are Running):
+
+     POD=$(kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/name={{ include "profi.name" . }} -o name | head -n1)
+     kubectl -n {{ .Release.Namespace }} exec "$POD" -- wget -qO- localhost:9401/ready
+     kubectl -n {{ .Release.Namespace }} exec "$POD" -- wget -qO- localhost:9401/status | head -n 50
+
+  3. Scrape metrics directly (port-forward for a local look):
+
+     kubectl -n {{ .Release.Namespace }} port-forward "$POD" 9401:9401 &
+     curl -s localhost:9401/metrics | grep -E '^profi_(cuda|nccl|ring_buffer|tracked)'
+
+{{- if .Values.serviceMonitor.enabled }}
+
+  4. ServiceMonitor is enabled.
+     If Prometheus does not pick it up, verify the selector on your Prometheus CR matches:
+
+     kubectl -n {{ .Release.Namespace }} get servicemonitor {{ include "profi.fullname" . }} -o yaml | grep -A5 labels:
+{{- end }}
+
+{{- if .Values.prometheusRule.enabled }}
+
+  5. PrometheusRule is enabled — {{ if .Values.prometheusRule.recording.enabled }}recording + {{ end }}alerting rules
+     are installed. Runbooks for each alert are published at:
+
+       {{ .Values.prometheusRule.runbookBaseUrl }}
+
+     Each alert carries a runbook_url annotation pointing to its specific runbook.
+{{- end }}
+
+{{- if .Values.grafanaDashboard.enabled }}
+
+  6. Grafana dashboard shipped as a ConfigMap (label {{ .Values.grafanaDashboard.labelKey }}={{ .Values.grafanaDashboard.labelValue | quote }}).
+     If your Grafana runs the sidecar-based dashboard provisioner, it will appear in folder
+     "{{ .Values.grafanaDashboard.folderName }}" within a minute.
+{{- end }}
+
+{{- if .Values.profi.otlp.endpoint }}
+
+  ✓ OTLP push exporter is enabled.
+     endpoint:  {{ .Values.profi.otlp.endpoint }} ({{ .Values.profi.otlp.protocol }})
+     interval:  {{ .Values.profi.otlp.intervalSeconds }}s, timeout {{ .Values.profi.otlp.timeoutSeconds }}s
+     service:   {{ .Values.profi.otlp.serviceName }}
+
+     Prometheus /metrics remains enabled in parallel (both read the same registry
+     atomically — values are identical by construction).
+
+     Verify the bridge started successfully:
+       kubectl -n {{ .Release.Namespace }} logs "$POD" | grep -i "otlp bridge"
+
+     Prometheus labels are renamed to OpenTelemetry semantic conventions on export
+     (pod → k8s.pod.name, gpu → gpu.id, etc.). See docs/METRICS_REFERENCE.md.
+{{- else }}
+
+  ℹ OTLP push exporter is disabled. Set profi.otlp.endpoint to a collector URL
+     (e.g. http://otel-collector.observability:4317) to enable push export
+     alongside Prometheus /metrics.
+{{- end }}
+
+{{- if eq .Values.profi.kernelMode "full" }}
+
+  ⚠ kernel-mode is set to "full" — use it for targeted diagnostics; overhead is workload-dependent.
+     Switch to "anonymous" (default) for production unless you specifically need kernel names.
+{{- end }}
+
+────────────────────────────────────────────────────────────────────────
+Docs:   https://github.com/Kaonael/profi
+Issues: https://github.com/Kaonael/profi/issues

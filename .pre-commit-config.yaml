@@ -1,0 +1,75 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        args: ["--markdown-linebreak-ext=md"]
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: ["--allow-multiple-documents"]
+        exclude: ^deploy/profi/templates/.*\.ya?ml$
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: detect-private-key
+      - id: check-added-large-files
+        args: ["--maxkb=2048"]
+
+  - repo: local
+    hooks:
+      - id: cargo-check
+        name: cargo check
+        entry: cargo check
+        language: system
+        pass_filenames: false
+
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all -- --check
+        language: system
+        pass_filenames: false
+
+      - id: clang-format
+        name: clang-format
+        entry: clang-format --dry-run --Werror
+        language: system
+        files: ^src/bpf/(profi\.bpf\.c|profi_events\.h)$
+
+      - id: clang-tidy
+        name: clang-tidy
+        entry: make c-tidy
+        language: system
+        pass_filenames: false
+        files: ^src/bpf/.*\.(c|h)$
+
+      - id: bpf-compile
+        name: bpf compile
+        entry: make bpf-compile
+        language: system
+        pass_filenames: false
+        files: ^src/bpf/.*\.(c|h)$
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --all-targets -- -D warnings
+        language: system
+        pass_filenames: false
+
+      - id: cargo-test
+        name: cargo test
+        entry: cargo test
+        language: system
+        pass_filenames: false
+
+      - id: helm-lint
+        name: helm lint
+        entry: helm lint deploy/profi
+        language: system
+        pass_filenames: false
+
+      - id: helm-template
+        name: helm template
+        entry: helm template profi deploy/profi --namespace gpu-profi
+        language: system
+        pass_filenames: false

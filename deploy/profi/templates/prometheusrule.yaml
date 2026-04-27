@@ -1,0 +1,326 @@
+{{- if .Values.prometheusRule.enabled -}}
+{{- $alerts := .Values.prometheusRule.alerts -}}
+{{- $runbookBase := .Values.prometheusRule.runbookBaseUrl -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "profi.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "profi.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    {{- if .Values.prometheusRule.recording.enabled }}
+    # -----------------------------------------------------------------------
+    # Recording rules: collapse high-cardinality labels (pid/comm/stream/kernel)
+    # so dashboards and alerts query pre-aggregated series.
+    # -----------------------------------------------------------------------
+    - name: profi.recording
+      interval: 30s
+      rules:
+        # ── CUDA API calls
+        - record: profi:cuda_calls:rate5m
+          expr: |
+            sum by (namespace, pod, gpu, operation) (
+              rate(profi_cuda_calls_total[5m])
+            )
+        - record: profi:cuda_duration:p99:5m
+          expr: |
+            histogram_quantile(0.99,
+              sum by (namespace, pod, gpu, operation, le) (
+                rate(profi_cuda_duration_bucket_total[5m])
+              )
+            )
+        - record: profi:cuda_duration:p50:5m
+          expr: |
+            histogram_quantile(0.5,
+              sum by (namespace, pod, gpu, operation, le) (
+                rate(profi_cuda_duration_bucket_total[5m])
+              )
+            )
+
+        # ── Memory transfer / allocation
+        - record: profi:cuda_memcpy_bytes:rate5m
+          expr: |
+            sum by (namespace, pod, gpu, direction) (
+              rate(profi_cuda_memcpy_bytes_total[5m])
+            )
+        - record: profi:cuda_malloc_bytes:rate5m
+          expr: |
+            sum by (namespace, pod, gpu) (
+              rate(profi_cuda_malloc_bytes_total[5m])
+            )
+        - record: profi:cuda_active_memory:pod
+          expr: |
+            sum by (namespace, pod, gpu) (
+              profi_cuda_active_memory_bytes
+            )
+        - record: profi:memcpy_d2d_ratio
+          expr: |
+            sum by (namespace, pod, gpu) (
+              rate(profi_cuda_memcpy_bytes_total{direction="d2d"}[5m])
+            )
+            /
+            clamp_min(
+              sum by (namespace, pod, gpu) (
+                rate(profi_cuda_memcpy_bytes_total[5m])
+              ),
+              1
+            )
+
+        # ── NCCL collectives
+        - record: profi:nccl_calls:rate5m
+          expr: |
+            sum by (namespace, pod, gpu, operation) (
+              rate(profi_nccl_calls_total[5m])
+            )
+        - record: profi:nccl_bytes:rate5m
+          expr: |
+            sum by (namespace, pod, gpu, operation) (
+              rate(profi_nccl_bytes_total[5m])
+            )
+        - record: profi:nccl_duration:p99:5m
+          expr: |
+            histogram_quantile(0.99,
+              sum by (namespace, pod, gpu, operation, le) (
+                rate(profi_nccl_duration_bucket_total[5m])
+              )
+            )
+
+        # ── CUDA kernel launches (anonymous + full mode)
+        - record: profi:cuda_kernel_launches:rate5m
+          expr: |
+            sum by (namespace, pod, gpu, kernel_class, phase) (
+              rate(profi_cuda_kernel_launches_total[5m])
+            )
+        # Full mode only — will simply return empty if profi runs in anonymous mode
+        - record: profi:cuda_kernel_duration:p99:5m
+          expr: |
+            histogram_quantile(0.99,
+              sum by (namespace, pod, gpu, kernel_class, phase, le) (
+                rate(profi_cuda_kernel_duration_bucket_total[5m])
+              )
+            )
+
+        # ── Errors
+        - record: profi:cuda_errors:rate5m
+          expr: |
+            sum by (namespace, pod, gpu, operation, error_code) (
+              rate(profi_cuda_errors_total[5m])
+            )
+    {{- end }}
+
+    # -----------------------------------------------------------------------
+    # Alerting rules — every critical/warning alert has a runbook_url annotation
+    # pointing to deploy/runbooks/<slug>.md
+    # -----------------------------------------------------------------------
+    - name: profi.alerts
+      rules:
+        {{- with $alerts.droppedEvents }}
+        {{- if .enabled }}
+        - alert: ProfiDroppedEvents
+          expr: increase(profi_dropped_events_total[5m]) > 0
+          for: {{ .for | default "5m" }}
+          labels:
+            severity: {{ .severity }}
+            component: profi
+          annotations:
+            summary: "profi is dropping eBPF events on {{ "{{" }} $labels.instance {{ "}}" }}"
+            description: |
+              profi has dropped {{ "{{" }} $value | printf "%.0f" {{ "}}" }} events in the last 5m on pod {{ "{{" }} $labels.pod {{ "}}" }}.
+              This means the ring buffer is overflowing — metrics will be undercounted.
+              See the runbook for remediation (usually: raise --entries-size or --aggregated-size,
+              or reduce --kernel-mode).
+            runbook_url: {{ include "profi.runbook" (dict "ctx" $ "slug" "event-loss") | quote }}
+        {{- end }}
+        {{- end }}
+
+        {{- with $alerts.ringBufferDropRate }}
+        {{- if .enabled }}
+        - alert: ProfiRingBufferDropRate
+          expr: profi_system_ring_buffer_drops_rate > {{ .threshold | default 100 }}
+          for: {{ .for | default "2m" }}
+          labels:
+            severity: {{ .severity }}
+            component: profi
+          annotations:
+            summary: "profi ring buffer dropping >{{ .threshold | default 100 }} events/s on {{ "{{" }} $labels.instance {{ "}}" }}"
+            description: |
+              profi is losing {{ "{{" }} $value | printf "%.0f" {{ "}}" }} events/s to ring buffer overflow on pod {{ "{{" }} $labels.pod {{ "}}" }}.
+              Metrics are being undercounted; mitigation is to raise map sizes or reduce kernel mode.
+            runbook_url: {{ include "profi.runbook" (dict "ctx" $ "slug" "event-loss") | quote }}
+        {{- end }}
+        {{- end }}
+
+        {{- with $alerts.cardinalityDrops }}
+        {{- if .enabled }}
+        - alert: ProfiCardinalityDrops
+          expr: increase(profi_cardinality_limit_drops_total[5m]) > 0
+          for: {{ .for | default "5m" }}
+          labels:
+            severity: {{ .severity }}
+            component: profi
+          annotations:
+            summary: "profi hit the cardinality limit on {{ "{{" }} $labels.instance {{ "}}" }}"
+            description: |
+              profi dropped {{ "{{" }} $value | printf "%.0f" {{ "}}" }} time-series in the last 5m because
+              --max-time-series was reached. Some workloads are no longer being observed.
+              Typically caused by a noisy pod producing many distinct streams or kernel names.
+            runbook_url: {{ include "profi.runbook" (dict "ctx" $ "slug" "cardinality-explosion") | quote }}
+        {{- end }}
+        {{- end }}
+
+        {{- with $alerts.noTrackedPids }}
+        {{- if .enabled }}
+        - alert: ProfiNoTrackedPids
+          expr: profi_tracked_pids == 0
+          for: {{ .for | default "10m" }}
+          labels:
+            severity: {{ .severity }}
+            component: profi
+          annotations:
+            summary: "profi is not tracking any CUDA processes on {{ "{{" }} $labels.instance {{ "}}" }}"
+            description: |
+              profi on node {{ "{{" }} $labels.instance {{ "}}" }} has zero tracked PIDs for {{ .for | default "10m" }}.
+              Either no CUDA workloads are scheduled (expected on empty nodes) or discovery is broken
+              (missing /proc mount, hostPID, or CAP_SYS_PTRACE).
+            runbook_url: {{ include "profi.runbook" (dict "ctx" $ "slug" "event-loss") | quote }}
+        {{- end }}
+        {{- end }}
+
+        {{- with $alerts.ncclHang }}
+        {{- if .enabled }}
+        - alert: ProfiNCCLHangDetected
+          expr: increase(profi_nccl_hang_detected_total[5m]) > 0
+          for: {{ .for | default "1m" }}
+          labels:
+            severity: {{ .severity }}
+            component: profi
+          annotations:
+            summary: "NCCL collective hang detected (pid={{ "{{" }} $labels.pid {{ "}}" }}, op={{ "{{" }} $labels.operation {{ "}}" }})"
+            description: |
+              profi observed an NCCL {{ "{{" }} $labels.operation {{ "}}" }} collective on PID {{ "{{" }} $labels.pid {{ "}}" }}
+              that exceeded the --nccl-hang-timeout threshold. Distributed training/inference is stuck.
+              Check the peer ranks, NCCL_DEBUG logs, and NVLink/driver status.
+            runbook_url: {{ include "profi.runbook" (dict "ctx" $ "slug" "nccl-hang") | quote }}
+        {{- end }}
+        {{- end }}
+
+        {{- with $alerts.ncclStraggler }}
+        {{- if .enabled }}
+        - alert: ProfiNCCLStraggler
+          expr: profi_nccl_straggler_ratio > {{ .threshold | default 1.5 }}
+          for: {{ .for | default "3m" }}
+          labels:
+            severity: {{ .severity }}
+            component: profi
+          annotations:
+            summary: "NCCL straggler: pid={{ "{{" }} $labels.pid {{ "}}" }} gpu={{ "{{" }} $labels.gpu {{ "}}" }} is {{ "{{" }} $value | printf \"%.2fx\" {{ "}}" }} slower than median"
+            description: |
+              On collective {{ "{{" }} $labels.operation {{ "}}" }}, GPU {{ "{{" }} $labels.gpu {{ "}}" }} (pid {{ "{{" }} $labels.pid {{ "}}" }})
+              is sustaining a {{ "{{" }} $value | printf "%.2f" {{ "}}" }}x latency vs the group median.
+              One slow rank stalls the whole collective; check GPU throttling, temperature, or NCCL_ALGO.
+            runbook_url: {{ include "profi.runbook" (dict "ctx" $ "slug" "nccl-straggler") | quote }}
+        {{- end }}
+        {{- end }}
+
+        {{- with $alerts.cudaErrors }}
+        {{- if .enabled }}
+        - alert: ProfiCUDAErrors
+          expr: increase(profi_cuda_errors_total[5m]) > 0
+          for: {{ .for | default "1m" }}
+          labels:
+            severity: {{ .severity }}
+            component: profi
+          annotations:
+            summary: "CUDA API returning errors on pod {{ "{{" }} $labels.pod {{ "}}" }} ({{ "{{" }} $labels.operation {{ "}}" }}, error_code={{ "{{" }} $labels.error_code {{ "}}" }})"
+            description: |
+              profi saw {{ "{{" }} $value | printf "%.0f" {{ "}}" }} CUDA API failures in the last 5m
+              on pod {{ "{{" }} $labels.pod {{ "}}" }}: operation={{ "{{" }} $labels.operation {{ "}}" }},
+              error_code={{ "{{" }} $labels.error_code {{ "}}" }}.
+              Common causes: OOM (cudaErrorMemoryAllocation=2), driver reset, illegal memory access.
+            runbook_url: {{ include "profi.runbook" (dict "ctx" $ "slug" "event-loss") | quote }}
+        {{- end }}
+        {{- end }}
+
+        {{- with $alerts.gpuThrottling }}
+        {{- if .enabled }}
+        - alert: ProfiGPUThrottling
+          expr: profi_gpu_throttle_active == 1
+          for: {{ .for | default "5m" }}
+          labels:
+            severity: {{ .severity }}
+            component: profi
+          annotations:
+            summary: "GPU {{ "{{" }} $labels.gpu {{ "}}" }} on {{ "{{" }} $labels.instance {{ "}}" }} throttling ({{ "{{" }} $labels.reason {{ "}}" }})"
+            description: |
+              GPU {{ "{{" }} $labels.gpu {{ "}}" }} ({{ "{{" }} $labels.gpu_uuid {{ "}}" }}) is throttling due to {{ "{{" }} $labels.reason {{ "}}" }}
+              on node {{ "{{" }} $labels.instance {{ "}}" }} for {{ .for | default "5m" }}.
+              Typical reasons: HW_THERMAL (cooling), HW_POWER_BRAKE (PSU), SW_THERMAL (software thermal cap).
+              Cross-check profi_gpu_temperature_celsius, profi_gpu_power_watts, and profi_nccl_straggler_ratio for this GPU.
+            runbook_url: {{ include "profi.runbook" (dict "ctx" $ "slug" "nccl-straggler") | quote }}
+        {{- end }}
+        {{- end }}
+
+        {{- with $alerts.exporterDown }}
+        {{- if .enabled }}
+        - alert: ProfiExporterDown
+          expr: up{job=~".*profi.*"} == 0
+          for: {{ .for | default "2m" }}
+          labels:
+            severity: {{ .severity }}
+            component: profi
+          annotations:
+            summary: "profi exporter is down on {{ "{{" }} $labels.instance {{ "}}" }}"
+            description: |
+              profi exporter on {{ "{{" }} $labels.instance {{ "}}" }} has been unreachable by Prometheus for {{ .for | default "2m" }}.
+              GPU telemetry from this node is missing.
+            runbook_url: {{ include "profi.runbook" (dict "ctx" $ "slug" "event-loss") | quote }}
+        {{- end }}
+        {{- end }}
+
+        {{- with $alerts.eventLoopSlow }}
+        {{- if .enabled }}
+        - alert: ProfiEventLoopSlow
+          expr: |
+            histogram_quantile(0.99,
+              sum by (instance, le) (rate(profi_system_event_loop_process_duration_seconds_bucket[5m]))
+            ) > {{ .thresholdSeconds | default 0.001 }}
+          for: {{ .for | default "5m" }}
+          labels:
+            severity: {{ .severity }}
+            component: profi
+          annotations:
+            summary: "profi event loop p99 > {{ .thresholdSeconds | default 0.001 }}s on {{ "{{" }} $labels.instance {{ "}}" }}"
+            description: |
+              profi's own event loop is running slow (p99 = {{ "{{" }} $value | printf "%.4fs" {{ "}}" }}).
+              Risk: profi may not keep up with eBPF ring buffer — raise entries-size or reduce kernel-mode.
+            runbook_url: {{ include "profi.runbook" (dict "ctx" $ "slug" "event-loss") | quote }}
+        {{- end }}
+        {{- end }}
+
+        {{- with $alerts.metricsAuthFailures }}
+        {{- if .enabled }}
+        - alert: ProfiMetricsAuthFailures
+          expr: |
+            sum by (instance, reason) (
+              rate(profi_system_http_auth_failures_total[5m])
+            ) > {{ .threshold | default 0.5 }}
+          for: {{ .for | default "10m" }}
+          labels:
+            severity: {{ .severity }}
+            component: profi
+          annotations:
+            summary: "profi /metrics auth failures on {{ "{{" }} $labels.instance {{ "}}" }} (reason={{ "{{" }} $labels.reason {{ "}}" }})"
+            description: |
+              profi is rejecting /metrics requests at a sustained rate of {{ "{{" }} $value | printf "%.2f" {{ "}}" }} req/s
+              (reason={{ "{{" }} $labels.reason {{ "}}" }}).
+              Either a scraper is misconfigured, a token has been rotated out from under its SA, or something is
+              probing the endpoint. Check the Prometheus/Grafana agent's serviceaccount and TLS material.
+            runbook_url: {{ include "profi.runbook" (dict "ctx" $ "slug" "metrics-auth-failures") | quote }}
+        {{- end }}
+        {{- end }}
+{{- end }}

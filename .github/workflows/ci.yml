@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang \
+            clang-format \
+            clang-tidy \
+            pkg-config \
+            autoconf \
+            automake \
+            autopoint \
+            libtool \
+            bison \
+            flex \
+            gawk \
+            m4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: cargo check
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: C format
+        run: make c-fmt-check
+
+      - name: C lint
+        run: make c-tidy
+
+      - name: BPF compile
+        run: make bpf-compile
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+  helm:
+    name: Helm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint chart
+        run: helm lint deploy/profi
+
+      - name: Render chart
+        run: helm template profi deploy/profi --namespace gpu-profi

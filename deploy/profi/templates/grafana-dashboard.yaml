@@ -1,0 +1,15 @@
+{{- if .Values.grafanaDashboard.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "profi.fullname" . }}-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "profi.labels" . | nindent 4 }}
+    {{ .Values.grafanaDashboard.labelKey }}: {{ .Values.grafanaDashboard.labelValue | quote }}
+  annotations:
+    {{ .Values.grafanaDashboard.folderAnnotation }}: {{ .Values.grafanaDashboard.folderName | quote }}
+data:
+  profi-dashboard.json: |-
+{{ .Files.Get "dashboards/profi-dashboard.json" | indent 4 }}
+{{- end }}

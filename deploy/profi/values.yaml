@@ -1,0 +1,344 @@
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/kaonael/profi-exporter
+  # tag defaults to .Chart.AppVersion when empty
+  tag: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+  # - name: regcred
+
+# ---------------------------------------------------------------------------
+# profi-specific runtime configuration (maps 1:1 to CLI flags in src/main.rs)
+# ---------------------------------------------------------------------------
+profi:
+  # --kernel-mode: off | anonymous | full
+  # off       => lowest overhead, no kernel-level metrics
+  # anonymous => production default; kernel launch counts without name resolution
+  # full      => targeted diagnostics; exact kernel names and duration histograms
+  kernelMode: anonymous
+
+  # --probe-profile: lean | full
+  # lean skips high-frequency diagnostic CUDA runtime probes for production use.
+  probeProfile: lean
+
+  # --enable-nvtx-tracing: phase tracking via libnvtx (prefill/decode/attention/...)
+  enableNvtxTracing: false
+
+  # --disable-nvml: turn off GPU hardware health collection via NVML
+  disableNvml: false
+
+  # --cudart-path: path to libcudart.so the exporter will use to resolve symbols
+  cudartPath: /usr/local/cuda/lib64/libcudart.so
+
+  # --proc-path: /proc of the host, mounted inside the container
+  procPath: /host/proc
+
+  # The BPF skeleton is baked directly into the binary by libbpf-cargo at
+  # build time, so there is no separate ELF blob path to configure.
+
+  # --listen: bind address for the HTTP metrics/health endpoints
+  listen: 0.0.0.0:9401
+
+  # --report-interval: periodic log report; 0 disables
+  reportIntervalSeconds: 0
+
+  intervals:
+    # --refresh-interval: /proc scan period for new CUDA-using PIDs
+    refreshSeconds: 10
+    # --gc-interval: stale PID cleanup period
+    gcSeconds: 60
+    # --nvml-interval: NVML poll period (GPU hardware health)
+    nvmlSeconds: 5
+
+  cardinality:
+    # --max-time-series: global cap on distinct label tuples (drops excess with a counter)
+    maxTimeSeries: 50000
+    # --max-streams-per-pid
+    maxStreamsPerPid: 32
+    # --max-kernels-per-pid (full mode)
+    maxKernelsPerPid: 512
+    # --sample-rate: 1 = no sampling, N = keep 1/N events
+    sampleRate: 1
+    # --detailed-launches: emit per-launch ringbuf events instead of relying only on LAUNCH_AGG
+    detailedLaunches: false
+
+  ebpfMaps:
+    # --entries-size: per-CPU event queue capacity
+    entriesSize: 10240
+    # --aggregated-size
+    aggregatedSize: 2048
+    # --launch-agg-size
+    launchAggSize: 8192
+    # --malloc-sizes-size (cudaMalloc allocation sizes)
+    mallocSizesSize: 131072
+
+  nccl:
+    # --nccl-hang-timeout: seconds before a stuck collective is considered hung; 0 disables
+    hangTimeoutSeconds: 60
+
+  # RUST_LOG level
+  logLevel: info
+
+  # OpenTelemetry OTLP push exporter. Always compiled in; auto-activates when
+  # `endpoint` is set. Prometheus /metrics endpoint stays on regardless.
+  # Header values (bearer tokens etc.) should come from a Secret via extraEnv
+  # setting OTEL_EXPORTER_OTLP_HEADERS rather than being committed to values.
+  otlp:
+    # gRPC or HTTP URL of the OTel Collector. Empty disables the exporter.
+    #   grpc:           http://otel-collector.observability:4317
+    #   http/protobuf:  http://otel-collector.observability:4318
+    endpoint: ""
+    # grpc | http/protobuf
+    protocol: grpc
+    # Push interval in seconds (OTel default 60; Prometheus scrapes usually 15-30s).
+    intervalSeconds: 60
+    # Per-export deadline in seconds.
+    timeoutSeconds: 10
+    # service.name resource attribute.
+    serviceName: profi
+    # TLS: leave empty to use system roots. insecure skips TLS entirely.
+    caCert: ""
+    clientCert: ""
+    clientKey: ""
+    insecure: false
+    # Extra resource attributes, comma-separated k=v (merged with defaults).
+    # Example: "deployment.environment=prod,team=ml-infra"
+    resourceAttrs: ""
+
+  # Inbound /metrics TLS. Independent from OTLP (which is outgoing).
+  #   off    => plain HTTP (default, backwards compatible)
+  #   server => serve TLS, accept any client
+  #   mtls   => serve TLS + require client cert signed by clientCA
+  metricsTls:
+    mode: "off"
+    # Option A: cert-manager integration (creates Certificate + Secret).
+    certManager:
+      enabled: false
+      issuerName: ""
+      issuerKind: ClusterIssuer
+      # DNS names for the server cert. Defaults to "<svc>.<ns>.svc" if empty.
+      dnsNames: []
+      duration: "8760h"     # 1 year
+      renewBefore: "720h"   # 30 days
+    # Option B: reference an existing Secret. Expected keys: tls.crt, tls.key,
+    # and — for mode=mtls — ca.crt containing the trust bundle for client
+    # certs. Ignored when certManager.enabled is true.
+    existingSecret: ""
+
+  # L7 authentication layered on top of TLS. Validates the caller.
+  #   off            => no L7 check
+  #   bearer         => require Bearer token, validate via K8s TokenReview
+  #   mtls-or-bearer => accept either a validated client cert OR a Bearer token
+  metricsAuth:
+    mode: "off"
+    # If set, TokenReview only accepts tokens projected for this audience.
+    # Requires callers to mount a projected ServiceAccount token with a
+    # matching `audience`. Leave empty to accept default API-server tokens.
+    audience: ""
+    # Successful TokenReview results are cached (negative results never are).
+    cacheTtlSeconds: 60
+    cacheSize: 1024
+
+  # Escape hatch for flags that aren't explicitly surfaced above.
+  # Items are appended verbatim to the container args, e.g.:
+  #   extraArgs:
+  #     - "--some-new-flag=value"
+  extraArgs: []
+
+# ---------------------------------------------------------------------------
+# Pod / DaemonSet spec
+# ---------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# hostPID is required: profi scans /proc of the host to discover CUDA-using PIDs
+# and attaches uprobes to their mapped libraries. Exposed here so operators are aware.
+hostPID: true
+
+# Runtime requires Linux >=6.6 for uprobe_multi. eBPF attach needs BPF + PERFMON
+# plus SYS_PTRACE for reading /proc/<pid>/maps of other pids' containers.
+securityContext:
+  runAsUser: 0
+  runAsNonRoot: false
+  privileged: false
+  allowPrivilegeEscalation: false
+  capabilities:
+    add:
+      - SYS_ADMIN
+      - BPF
+      - PERFMON
+      - SYS_PTRACE
+    drop:
+      - ALL
+
+priorityClassName: system-node-critical
+
+# Target only nodes that advertise NVIDIA GPUs (set by gpu-operator or the nvidia device-plugin).
+nodeSelector:
+  nvidia.com/gpu.present: "true"
+
+tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+
+# profi does not request nvidia.com/gpu resources, because reserving GPUs for
+# telemetry would reduce workload capacity. The NVIDIA runtime still has to
+# inject driver libraries/devices so NVML can load libnvidia-ml.so.1.
+nvidia:
+  enabled: true
+  runtimeClassName: nvidia
+  visibleDevices: all
+  driverCapabilities: compute,utility
+
+affinity: {}
+
+updateStrategy:
+  type: RollingUpdate
+
+podAnnotations: {}
+podLabels: {}
+
+extraEnv: []
+  # - name: SOME_VAR
+  #   value: "some value"
+
+extraVolumes: []
+extraVolumeMounts: []
+
+# Liveness/readiness probe knobs (paths are fixed: /health and /ready)
+probes:
+  liveness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 3
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# ---------------------------------------------------------------------------
+# ServiceAccount + RBAC (needs list/watch on pods to enrich metrics with k8s labels)
+# ---------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  create: true
+
+# ---------------------------------------------------------------------------
+# Service (headless by default — one endpoint per pod so Prometheus scrapes each directly)
+# ---------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 9401
+  # Headless: set to "None" so every DaemonSet pod is its own endpoint.
+  # Change to "" (empty) to get a VIP — rarely useful for a DaemonSet.
+  clusterIP: None
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9401"
+    prometheus.io/path: "/metrics"
+
+# ---------------------------------------------------------------------------
+# Prometheus Operator ServiceMonitor
+# ---------------------------------------------------------------------------
+serviceMonitor:
+  enabled: true
+  interval: 15s
+  scrapeTimeout: ""
+  # Extra labels required by your Prometheus Operator's serviceMonitorSelector
+  # (e.g. {release: kube-prometheus-stack})
+  labels: {}
+  relabelings: []
+  metricRelabelings: []
+
+# ---------------------------------------------------------------------------
+# PrometheusRule (recording + alerting rules)
+# See deploy/runbooks/ for the playbooks linked from runbook_url annotations.
+# ---------------------------------------------------------------------------
+prometheusRule:
+  enabled: true
+  # Extra labels required by your Prometheus Operator's ruleSelector
+  labels: {}
+  # Base URL for runbooks; the full URL becomes
+  # "<runbookBaseUrl>/<alert-slug>.md"
+  runbookBaseUrl: "https://github.com/Kaonael/profi/blob/main/deploy/runbooks"
+  # Recording rules collapse high-cardinality labels (pid/comm/stream/kernel)
+  # so dashboards stay fast.
+  recording:
+    enabled: true
+  alerts:
+    droppedEvents:
+      enabled: true
+      severity: warning
+      for: 5m
+    ringBufferDropRate:
+      enabled: true
+      severity: warning
+      for: 2m
+      # events/sec sustained
+      threshold: 100
+    cardinalityDrops:
+      enabled: true
+      severity: warning
+      for: 5m
+    noTrackedPids:
+      enabled: true
+      severity: warning
+      for: 10m
+    ncclHang:
+      enabled: true
+      severity: critical
+      for: 1m
+    ncclStraggler:
+      enabled: true
+      severity: warning
+      for: 3m
+      # P95 slowest rank / median rank ratio; >1.5 means one rank is >50% slower
+      threshold: 1.5
+    cudaErrors:
+      enabled: true
+      severity: critical
+      for: 1m
+    gpuThrottling:
+      enabled: true
+      severity: warning
+      for: 5m
+    exporterDown:
+      enabled: true
+      severity: critical
+      for: 2m
+    eventLoopSlow:
+      enabled: true
+      severity: info
+      for: 5m
+      # seconds; p99 of profi's own processing loop
+      thresholdSeconds: 0.001
+    metricsAuthFailures:
+      enabled: true
+      severity: warning
+      for: 10m
+      # requests/sec sustained before firing
+      threshold: 0.5
+
+# ---------------------------------------------------------------------------
+# Grafana dashboard (shipped as a ConfigMap for the Grafana sidecar to pick up)
+# ---------------------------------------------------------------------------
+grafanaDashboard:
+  enabled: true
+  labelKey: grafana_dashboard
+  labelValue: "1"
+  folderAnnotation: grafana_folder
+  folderName: "GPU / profi"

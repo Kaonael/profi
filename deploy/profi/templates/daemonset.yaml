@@ -1,0 +1,215 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "profi.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "profi.labels" . | nindent 4 }}
+spec:
+  updateStrategy:
+    {{- toYaml .Values.updateStrategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "profi.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "profi.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ (regexSplit ":" .Values.profi.listen -1) | last | quote }}
+        prometheus.io/path: "/metrics"
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- $nvidia := default dict .Values.nvidia }}
+      {{- $nvidiaEnabled := true }}
+      {{- if hasKey $nvidia "enabled" }}
+      {{- $nvidiaEnabled = $nvidia.enabled }}
+      {{- end }}
+      {{- $nvidiaRuntimeClassName := "nvidia" }}
+      {{- if hasKey $nvidia "runtimeClassName" }}
+      {{- $nvidiaRuntimeClassName = $nvidia.runtimeClassName }}
+      {{- end }}
+      serviceAccountName: {{ include "profi.serviceAccountName" . }}
+      hostPID: {{ .Values.hostPID }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- if and $nvidiaEnabled $nvidiaRuntimeClassName }}
+      runtimeClassName: {{ $nvidiaRuntimeClassName | quote }}
+      {{- end }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: profi
+          image: {{ include "profi.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--listen={{ .Values.profi.listen }}"
+            - "--cudart={{ .Values.profi.cudartPath }}"
+            - "--proc-path={{ .Values.profi.procPath }}"
+            - "--kernel-mode={{ .Values.profi.kernelMode }}"
+            - "--probe-profile={{ .Values.profi.probeProfile }}"
+            - "--refresh-interval={{ .Values.profi.intervals.refreshSeconds }}"
+            - "--gc-interval={{ .Values.profi.intervals.gcSeconds }}"
+            - "--nvml-interval={{ .Values.profi.intervals.nvmlSeconds }}"
+            - "--report-interval={{ .Values.profi.reportIntervalSeconds }}"
+            - "--max-time-series={{ .Values.profi.cardinality.maxTimeSeries }}"
+            - "--max-streams-per-pid={{ .Values.profi.cardinality.maxStreamsPerPid }}"
+            - "--max-kernels-per-pid={{ .Values.profi.cardinality.maxKernelsPerPid }}"
+            - "--sample-rate={{ .Values.profi.cardinality.sampleRate }}"
+            - "--entries-size={{ .Values.profi.ebpfMaps.entriesSize }}"
+            - "--aggregated-size={{ .Values.profi.ebpfMaps.aggregatedSize }}"
+            - "--launch-agg-size={{ .Values.profi.ebpfMaps.launchAggSize }}"
+            - "--malloc-sizes-size={{ .Values.profi.ebpfMaps.mallocSizesSize }}"
+            - "--nccl-hang-timeout={{ .Values.profi.nccl.hangTimeoutSeconds }}"
+            {{- if .Values.profi.cardinality.detailedLaunches }}
+            - "--detailed-launches"
+            {{- end }}
+            {{- if .Values.profi.enableNvtxTracing }}
+            - "--enable-nvtx-tracing"
+            {{- end }}
+            {{- if .Values.profi.disableNvml }}
+            - "--disable-nvml"
+            {{- end }}
+            {{- if .Values.profi.otlp.endpoint }}
+            - "--otlp-endpoint={{ .Values.profi.otlp.endpoint }}"
+            - "--otlp-protocol={{ .Values.profi.otlp.protocol }}"
+            - "--otlp-interval-secs={{ .Values.profi.otlp.intervalSeconds }}"
+            - "--otlp-timeout-secs={{ .Values.profi.otlp.timeoutSeconds }}"
+            - "--otlp-service-name={{ .Values.profi.otlp.serviceName }}"
+            {{- if .Values.profi.otlp.caCert }}
+            - "--otlp-ca-cert={{ .Values.profi.otlp.caCert }}"
+            {{- end }}
+            {{- if .Values.profi.otlp.clientCert }}
+            - "--otlp-client-cert={{ .Values.profi.otlp.clientCert }}"
+            {{- end }}
+            {{- if .Values.profi.otlp.clientKey }}
+            - "--otlp-client-key={{ .Values.profi.otlp.clientKey }}"
+            {{- end }}
+            {{- if .Values.profi.otlp.insecure }}
+            - "--otlp-insecure"
+            {{- end }}
+            {{- if .Values.profi.otlp.resourceAttrs }}
+            - "--otlp-resource-attrs={{ .Values.profi.otlp.resourceAttrs }}"
+            {{- end }}
+            {{- end }}
+            {{- if ne .Values.profi.metricsTls.mode "off" }}
+            - "--metrics-tls-mode={{ .Values.profi.metricsTls.mode }}"
+            - "--metrics-tls-cert=/etc/profi/tls/tls.crt"
+            - "--metrics-tls-key=/etc/profi/tls/tls.key"
+            {{- if eq .Values.profi.metricsTls.mode "mtls" }}
+            - "--metrics-tls-client-ca=/etc/profi/tls/ca.crt"
+            {{- end }}
+            {{- end }}
+            {{- if ne .Values.profi.metricsAuth.mode "off" }}
+            - "--metrics-auth-mode={{ .Values.profi.metricsAuth.mode }}"
+            {{- if .Values.profi.metricsAuth.audience }}
+            - "--metrics-auth-audience={{ .Values.profi.metricsAuth.audience }}"
+            {{- end }}
+            - "--metrics-auth-cache-ttl={{ .Values.profi.metricsAuth.cacheTtlSeconds }}"
+            - "--metrics-auth-cache-size={{ .Values.profi.metricsAuth.cacheSize }}"
+            {{- end }}
+            {{- range .Values.profi.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: RUST_LOG
+              value: {{ .Values.profi.logLevel | quote }}
+            {{- if $nvidiaEnabled }}
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: {{ default "all" $nvidia.visibleDevices | quote }}
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: {{ default "compute,utility" $nvidia.driverCapabilities | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: {{ (regexSplit ":" .Values.profi.listen -1) | last | int }}
+              protocol: TCP
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+              scheme: {{ if ne .Values.profi.metricsTls.mode "off" }}HTTPS{{ else }}HTTP{{ end }}
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+              scheme: {{ if ne .Values.profi.metricsTls.mode "off" }}HTTPS{{ else }}HTTP{{ end }}
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: host-proc
+              mountPath: {{ .Values.profi.procPath }}
+              readOnly: true
+            - name: sys-kernel-debug
+              mountPath: /sys/kernel/debug
+              readOnly: true
+            - name: bpf-fs
+              mountPath: /sys/fs/bpf
+            {{- if ne .Values.profi.metricsTls.mode "off" }}
+            - name: metrics-tls
+              mountPath: /etc/profi/tls
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: host-proc
+          hostPath:
+            path: /proc
+        - name: sys-kernel-debug
+          hostPath:
+            path: /sys/kernel/debug
+        - name: bpf-fs
+          hostPath:
+            path: /sys/fs/bpf
+        {{- if ne .Values.profi.metricsTls.mode "off" }}
+        - name: metrics-tls
+          secret:
+            secretName: {{ if .Values.profi.metricsTls.certManager.enabled -}}
+              {{ include "profi.fullname" . }}-metrics-tls
+            {{- else -}}
+              {{ required "profi.metricsTls.existingSecret is required when certManager.enabled is false" .Values.profi.metricsTls.existingSecret }}
+            {{- end }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

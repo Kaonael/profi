@@ -1,0 +1,30 @@
+apiVersion: v2
+name: profi
+description: eBPF-based zero-instrumentation CUDA/NCCL profiler for LLM inference on Kubernetes
+type: application
+version: 0.0.1
+appVersion: "v0.0.1"
+kubeVersion: ">=1.24.0-0"
+keywords:
+  - gpu
+  - nvidia
+  - cuda
+  - nccl
+  - llm
+  - ebpf
+  - profiler
+  - observability
+  - prometheus
+  - opentelemetry
+  - otlp
+home: https://github.com/Kaonael/profi
+sources:
+  - https://github.com/Kaonael/profi
+maintainers:
+  - name: Nikita Sukharev
+    email: kaonael@gmail.com
+    url: https://github.com/Kaonael
+annotations:
+  category: Monitoring
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/prerelease: "true"

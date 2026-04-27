@@ -1,0 +1,52 @@
+{{- if .Values.serviceMonitor.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "profi.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "profi.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "profi.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+      {{- if ne .Values.profi.metricsTls.mode "off" }}
+      scheme: https
+      tlsConfig:
+        {{- if eq .Values.profi.metricsTls.mode "mtls" }}
+        # Prometheus must present a client cert signed by the same CA that
+        # profi trusts. Wire up via serviceMonitor.tlsConfigSecret in your
+        # Prometheus stack (cert-manager Certificate is recommended).
+        caFile: /etc/prometheus/secrets/{{ include "profi.fullname" . }}-client-tls/ca.crt
+        certFile: /etc/prometheus/secrets/{{ include "profi.fullname" . }}-client-tls/tls.crt
+        keyFile: /etc/prometheus/secrets/{{ include "profi.fullname" . }}-client-tls/tls.key
+        {{- else }}
+        # server mode — only verify the server cert.
+        caFile: /etc/prometheus/secrets/{{ include "profi.fullname" . }}-client-tls/ca.crt
+        {{- end }}
+        serverName: {{ include "profi.fullname" . }}.{{ .Release.Namespace }}.svc
+      {{- end }}
+      {{- if eq .Values.profi.metricsAuth.mode "bearer" }}
+      # Prometheus scrapes with a ServiceAccount token. The token's SA must
+      # have no extra privileges — TokenReview only verifies identity.
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      {{- end }}
+      {{- with .Values.serviceMonitor.scrapeTimeout }}
+      scrapeTimeout: {{ . }}
+      {{- end }}
+      {{- with .Values.serviceMonitor.relabelings }}
+      relabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.serviceMonitor.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

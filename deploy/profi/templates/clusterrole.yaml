@@ -1,0 +1,20 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "profi.fullname" . }}
+  labels:
+    {{- include "profi.labels" . | nindent 4 }}
+rules:
+  # profi reads pod metadata to enrich metrics with namespace/pod/container labels
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "watch"]
+  {{- if ne .Values.profi.metricsAuth.mode "off" }}
+  # --metrics-auth-mode=bearer|mtls-or-bearer validates Bearer tokens
+  # against the Kubernetes authentication API.
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  {{- end }}
+{{- end }}

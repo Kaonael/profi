@@ -1,0 +1,11 @@
+Checks: >
+  -*,
+  clang-analyzer-*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  readability-redundant-control-flow,
+  readability-simplify-boolean-expr
+WarningsAsErrors: "*"
+HeaderFilterRegex: "^src/bpf/.*"
+FormatStyle: file
