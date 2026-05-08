@@ -30,15 +30,6 @@ Assumed adversaries:
 3. **Passive network observer.** Should not be able to read metrics off
    the wire.
 
-Out of scope:
-
-- Node takeover: if an attacker has root on the GPU node they already win.
-- Compromise of the legitimate Prometheus that profi serves — profi
-  trusts whatever the operator configured.
-- Secrets mounted into observed workload pods: profi reads process maps and
-  selected kernel-name strings, but it does not scrape workload files,
-  environment variables, or arbitrary process memory as metric labels.
-
 ## `/metrics` protection matrix
 
 Two independent axes, configured via Helm values
@@ -51,11 +42,6 @@ Two independent axes, configured via Helm values
 | `server`       | TLS only, any client   | TLS + Bearer (classic K8s ServiceMonitor) | invalid                  |
 | `mtls`         | TLS + client cert (CA-pinned) | invalid (use `mtls-or-bearer`) | TLS + (client cert **or** Bearer) — **recommended** |
 
-**Rationale for `mtls-or-bearer`:** kube-prometheus-stack and the Grafana
-Agent Operator both know how to present a client certificate, and both
-know how to inject a ServiceAccount token. Accepting either lets profi
-serve heterogeneous scrapers without forcing a single auth scheme.
-
 **`/health` and `/ready` always bypass L7 auth** so kubelet probes keep
 working. When TLS is enabled, the probes use HTTPS (kubelet supports
 `scheme: HTTPS`) — insecureSkipVerify is implicit since kubelet does not
@@ -63,9 +49,7 @@ check the cert.
 
 ## Bearer token validation
 
-profi validates Bearer tokens via the Kubernetes `TokenReview` API. No
-other mechanism (JWT verification, shared secret, etc.) is supported;
-the goal is to delegate trust decisions entirely to the cluster.
+profi validates Bearer tokens via the Kubernetes `TokenReview` API.
 
 - **Audience binding** (`--metrics-auth-audience`): when set, only tokens
   projected with a matching `audience` are accepted. This is defense in
@@ -77,9 +61,6 @@ the goal is to delegate trust decisions entirely to the cluster.
   Negative results are **never** cached so revoked tokens stop working
   within one request. The cache TTL should be well below the token
   lifetime — 60s is a safe default.
-
-- The token itself is never logged, never sent over OTLP, never written
-  to disk. Only `SHA-256` digests are cached.
 
 ## Outbound OTLP mTLS
 

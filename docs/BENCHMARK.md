@@ -40,108 +40,76 @@ should focus.
 
 ## Benchmark Results
 
-### Qwen3.5-35B TP=2 Anonymous Stress
+### Qwen3.5-35B TP=2 Anonymous Stress (SGLang)
 
 **Workload**
 
 | Field | Value |
 |---|---|
-| Model | Qwen3.5-35B |
+| Model | Qwen3.6-35B-A3B-FP8 |
+| Runtime | SGLang |
 | Tensor parallelism | TP=2 |
-| Load | 500 prompts, 512/512 tokens |
-| Concurrency | 64 |
+| Load | 5000 prompts, 512/512 tokens |
+| Concurrency | 256 |
 | Profiler mode | `anonymous` + `lean` |
 
 **Result**
 
 | Metric | With profiler | Without profiler | Overhead |
 |---|---:|---:|---:|
-| Request throughput | 10.41 req/s | 10.49 req/s | `-0.8%` |
-| Output token throughput | 5328 tok/s | 5369 tok/s | `-0.8%` |
-| Total token throughput | 10655 tok/s | 10737 tok/s | `-0.8%` |
-| Mean TTFT | 406.8 ms | 383.9 ms | `+6.0%` |
-| Median TTFT | 419.1 ms | 393.8 ms | `+6.4%` |
-| Mean TPOT | 10.97 ms | 10.92 ms | `+0.5%` |
-| Mean ITL | 10.98 ms | 10.91 ms | `+0.6%` |
+| Request throughput | 14.43 req/s | 15.24 req/s | `-5.3%` |
+| Output token throughput | 1849 tok/s | 1953 tok/s | `-5.3%` |
+| Total token throughput | 9178 tok/s | 9692 tok/s | `-5.3%` |
+| Median TTFT | 1640.8 ms | 1547.4 ms | `+6.0%` |
+| Median TPOT | 129.5 ms | 122.8 ms | `+5.4%` |
 
-**Profiler health**
+Interpretation: anonymous mode has a measurable but acceptable (~5-6%) impact on throughput and latency for this high-concurrency SGLang workload.
 
-| Metric | Value |
-|---|---:|
-| `profi_dropped_events_total` | 0 |
-| Cardinality limit hits | 0 |
-| NCCL hangs | 0 |
-| CUDA calls handled | about 456K in 48s |
-| NCCL calls handled | about 9.3K in 48s |
-
-Interpretation: anonymous mode has negligible throughput impact and small TTFT
-impact on this workload.
-
-### Qwen3-14B TP=2 Full + Lean
+### Qwen3.5-35B TP=2 Full + Lean (vLLM)
 
 **Workload**
 
 | Field | Value |
 |---|---|
 | Runtime | vLLM |
-| Model | Qwen/Qwen3-14B |
+| Model | Qwen3.6-35B-A3B-FP8 |
 | Tensor parallelism | TP=2 |
-| Load | 1000 prompts |
-| Concurrency | 128 |
-| Request rate | `inf` |
+| Load | 2000 prompts |
+| Concurrency | 256 |
+| Request rate | `13` (rate-limited) |
 | Profiler mode | `full` + `lean` |
 
 **Result**
 
 | Metric | Baseline | Full + lean | Overhead |
 |---|---:|---:|---:|
-| Mean TTFT | 149.26 ms | 160.70 ms | `+7.7%` |
-| Median TTFT | 149.95 ms | 164.51 ms | `+9.7%` |
-| P99 TTFT | 332.23 ms | 327.81 ms | `-1.3%` |
-| Throughput | 86.17 req/s | 85.05 req/s | `-1.3%` |
-| Mean TPOT | 10.09 ms | 10.12 ms | `+0.3%` |
-| P99 TPOT | 10.50 ms | 10.47 ms | approximately `0%` |
+| Median TTFT | 187.5 ms | 207.8 ms | `+10.8%` |
+| Median TPOT | 40.2 ms | 46.7 ms | `+16.1%` |
+| Throughput | 12.73 req/s | 12.71 req/s | `-0.1%` |
 
-**Profiler health**
+Interpretation: in vLLM, `full` mode overhead is more visible in per-token latency (TPOT) due to the high frequency of kernel launches being traced, while throughput remains stable under rate-limited load.
 
-| Metric | Value |
-|---|---:|
-| `profi_dropped_events_total` | 0 |
-| `profi_system_ring_buffer_drops_rate` | 0 |
-| `profi_system_launch_agg_drops_total` | 0 |
-| `profi_tracked_pids` | 2 |
-| `profi_nccl_calls_total` sum | 10,274 |
-| `profi_cuda_kernel_launches_total` sum | 543,124 across 573 series |
-
-NCCL byte-volume claims require separate validation of
-`profi_nccl_bytes_total` argument decoding.
-
-Interpretation: full mode is suitable for targeted kernel-level diagnostics on
-this workload shape.
-
-### DeepSeek-V4 TP=8
+### DeepSeek-V4 TP=8 (SGLang)
 
 **Workload**
 
 | Field | Value |
 |---|---|
 | Runtime | SGLang |
-| Model | DeepSeek-V4-Flash-FP |
+| Model | DeepSeek-V4-Flash |
 | Tensor parallelism | TP=8 |
-| Decoding | EAGLE speculative decoding |
-| Load shape | Closed-loop, `rate=inf` |
+| Load shape | 1000 prompts, Concurrency 256 |
 | Profiler mode | `anonymous` + `lean`, `full` + `lean` |
 
 **Result**
 
-| Mode | Result |
-|---|---:|
-| `anonymous` + `lean` | within measurement noise |
-| `full` + `lean` | `-9%` TTFT delta |
+| Mode | Throughput Overhead | Median TTFT Delta |
+|---|---:|---:|
+| `anonymous` + `lean` | `-0.9%` | `+0.4%` |
+| `full` + `lean` | `-3.3%` | `+4.8%` |
 
-Interpretation: anonymous mode is appropriate for continuous production
-monitoring on this kernel-launch-dense workload. Full mode remains targeted,
-but exact kernel names are practical for bounded diagnostic windows.
+Interpretation: anonymous mode is highly efficient on large TP=8 configurations, with overhead remaining below 1%. Full mode adds about 3-5% overhead, making it very practical for diagnostic windows.
+
 
 ## Operational Guidance
 
