@@ -37,8 +37,6 @@ use profi::report::{print_report, TermStats};
 use profi::server::{serve_http, AppState};
 use profi::symbols;
 
-// ── CLI ─────────────────────────────────────────────────────────────────────
-
 /// Which CUDA Runtime API surface profi attaches uprobes to.
 /// `lean` (default) skips uprobes for service-y calls that fire millions of
 /// times on the inference hot path but contribute little to dashboards.
@@ -55,8 +53,6 @@ enum ProbeProfile {
     Full,
 }
 
-/// Probe (entry, ret) name pairs attached only when `--probe-profile=full`.
-/// Each name here must exactly match an `fn_name` in `probes_base`.
 const DIAGNOSTIC_ONLY_FN_NAMES: &[&str] = &[
     "cudaStreamSynchronize",
     "cudaEventSynchronize",
@@ -98,69 +94,51 @@ struct Args {
     #[arg(long, default_value_t = 10)]
     refresh_interval: u64,
 
-    /// GC interval for stale PID cleanup (seconds)
     #[arg(long, default_value_t = 60)]
     gc_interval: u64,
 
-    /// Kernel tracing mode: full (names+histograms), anonymous (count+duration only), off
     #[arg(long, value_enum, default_value = "anonymous")]
     kernel_mode: KernelMode,
 
-    /// CUDA Runtime probe profile. Default `lean` = production-ready overhead
-    /// (skips stream/event syncs, memset, pinned-memory probes).
     #[arg(long, value_enum, default_value = "lean")]
     probe_profile: ProbeProfile,
 
-    /// Enable NVTX range tracing (higher overhead, use for debugging)
     #[arg(long)]
     enable_nvtx_tracing: bool,
 
-    /// Maximum total time series before dropping new ones (cardinality protection)
     #[arg(long, default_value_t = 50000)]
     max_time_series: usize,
 
-    /// Maximum distinct streams per PID before collapsing to stream="default"
     #[arg(long, default_value_t = 32)]
     max_streams_per_pid: usize,
 
-    /// Maximum unique kernel names per PID before collapsing to kernel="other"
     #[arg(long, default_value_t = 512)]
     max_kernels_per_pid: usize,
 
-    /// INFLIGHT LruHashMap max entries (eBPF map for in-flight probes)
     #[arg(long, default_value_t = 10240)]
     entries_size: u32,
 
-    /// AGGREGATED PerCpuHashMap max entries (eBPF map for in-kernel aggregation)
     #[arg(long, default_value_t = 2048)]
     aggregated_size: u32,
 
-    /// LAUNCH_AGG PerCpuHashMap max entries (cuLaunchKernel aggregation, keyed by pid+host_fun+stream)
     #[arg(long, default_value_t = 8192)]
     launch_agg_size: u32,
 
-    /// Also emit a ringbuf event on every cuLaunchKernel (in full mode) for Prometheus
-    /// histogram precision and OTel exemplar correlation.
     #[arg(long)]
     detailed_launches: bool,
 
-    /// MALLOC_SIZES LruHashMap max entries (eBPF map for active memory tracking, increase for PyTorch)
     #[arg(long, default_value_t = 131072)]
     malloc_sizes_size: u32,
 
-    /// Sampling rate for aggregatable events (1=no sampling, N=sample 1 in N events)
     #[arg(long, default_value_t = 1)]
     sample_rate: u32,
 
-    /// Disable NVML GPU hardware monitoring
     #[arg(long)]
     disable_nvml: bool,
 
-    /// NVML polling interval in seconds
     #[arg(long, default_value_t = 5)]
     nvml_interval: u64,
 
-    /// NCCL hang detection timeout in seconds (0=disabled)
     #[arg(long, default_value_t = 60)]
     nccl_hang_timeout: u64,
 
@@ -171,18 +149,11 @@ struct Args {
     metrics_security: MetricsSecurityArgs,
 }
 
-/// Attach request from the discovery thread to the main task.
 struct AttachRequest {
-    lib: String, // "libcudart.so" | "libnccl.so" | "libcuda.so" | "libnvtx3interop.so"
+    lib: String,
     host_path: String,
     devinode: DevInode,
 }
-
-// ── Attach helper ─────────────────────────────────────────────────────────
-//
-// Look up a program by name in the loaded skeleton and attach it as a
-// u(ret)probe to (binary_path, func_name). Soft-fail per symbol: callers
-// that want best-effort attach log the error and continue.
 
 fn attach_uprobe(
     skel: &mut ProfiSkel<'static>,
@@ -198,7 +169,6 @@ fn attach_uprobe(
         retprobe,
         ..Default::default()
     };
-    // Match against every known probe. A big table but purely mechanical.
     let link_res: libbpf_rs::Result<libbpf_rs::Link> = match prog_name {
         "cuda_malloc" => skel
             .progs
@@ -572,10 +542,6 @@ fn attach_nccl_probes_multi(
     Ok(links.len() - start_len)
 }
 
-// ── Map access helpers ────────────────────────────────────────────────────
-
-/// Per-CPU HASH map drain: processes each present key inline, removing it
-/// afterwards so slots are freed for future inserts.
 fn drain_percpu_hash<V, F>(map: &libbpf_rs::MapMut<'_>, mut process: F) -> Result<usize>
 where
     V: Copy,
@@ -622,7 +588,6 @@ fn inc_cumulative_bucket_counters<const N: usize>(
     }
 }
 
-/// Read a single-slot PerCpuArray<u64> and sum across CPUs.
 fn read_percpu_counter(map: &libbpf_rs::MapMut<'_>) -> Option<u64> {
     let key = 0u32.to_ne_bytes();
     let percpu = map.lookup_percpu(&key, MapFlags::ANY).ok()??;
@@ -634,8 +599,6 @@ fn read_percpu_counter(map: &libbpf_rs::MapMut<'_>) -> Option<u64> {
     }
     Some(total)
 }
-
-// ── Main ──────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -652,7 +615,6 @@ async fn main() -> Result<()> {
     let kernel_mode = args.kernel_mode;
     info!("kernel tracing mode: {:?}", kernel_mode);
 
-    // ── Load BPF skeleton ───────────────────────────────────────────────
     let open_object: &'static mut MaybeUninit<OpenObject> =
         Box::leak(Box::new(MaybeUninit::uninit()));
     let mut open_skel: OpenProfiSkel<'static> = ProfiSkelBuilder::default()
@@ -683,7 +645,6 @@ async fn main() -> Result<()> {
     let mut skel: ProfiSkel<'static> = open_skel.load().context("load BPF skeleton")?;
     let mut attached_links: Vec<libbpf_rs::Link> = Vec::new();
 
-    // Write control maps. Index-0 single-slot ARRAY — key and value are u32.
     let zero_key = 0u32.to_ne_bytes();
     let mode_val: u32 = match kernel_mode {
         KernelMode::Anonymous => 1,
@@ -716,7 +677,6 @@ async fn main() -> Result<()> {
 
     let pid = if args.pid > 0 { Some(args.pid) } else { None };
 
-    // ── Probe lists ────────────────────────────────────────────────────
     let probes_base: &[(&str, &str)] = &[
         ("cuda_malloc", "cudaMalloc"),
         ("cuda_malloc_ret", "cudaMalloc"),
@@ -805,7 +765,6 @@ async fn main() -> Result<()> {
         ("nvtx_range_pop", "nvtxRangePop"),
     ];
 
-    // ── Initial attach (best-effort) ───────────────────────────────────
     let mut initial_attached_cuda: HashSet<DevInode> = HashSet::new();
     if std::path::Path::new(&args.cudart).exists() {
         match attach_probes(&mut skel, &mut attached_links, probes, &args.cudart, pid) {
@@ -832,7 +791,6 @@ async fn main() -> Result<()> {
         );
     }
 
-    // ── Enrichment (K8s + GPU) ─────────────────────────────────────────
     let enricher = Enricher::new(args.proc_path.clone());
     let refresh = Duration::from_secs(args.refresh_interval);
     if let Some(node) = &args.node_name {
@@ -841,11 +799,9 @@ async fn main() -> Result<()> {
         info!("NODE_NAME not set — K8s pod enrichment disabled");
     }
 
-    // ── Prometheus metrics ──────────────────────────────────────────────
     let metrics = Metrics::new(kernel_mode).context("failed to create metrics registry")?;
     metrics.publish_gpu_info(&enricher.gpu_devices);
 
-    // ── OTLP bridge ────────────────────────────────────────────────────
     let process_start = Instant::now();
     if let Some(otlp_cfg) = OtlpConfig::resolve(&args.otlp)? {
         OtlpBridge::start(otlp_cfg, metrics.clone(), process_start)
@@ -854,7 +810,6 @@ async fn main() -> Result<()> {
         info!("OTLP endpoint not configured — push exporter disabled (Prometheus /metrics still active)");
     }
 
-    // ── Shared state ───────────────────────────────────────────────────
     let app_state = Arc::new(AppState {
         metrics: metrics.clone(),
         heartbeat_ns: std::sync::atomic::AtomicU64::new(0),
@@ -874,7 +829,6 @@ async fn main() -> Result<()> {
 
     let term_stats: Arc<Mutex<HashMap<(u32, u32), TermStats>>> = Arc::default();
 
-    // ── Discovery thread: scans /proc/*/maps, sends AttachRequests ─────
     let (attach_tx, mut attach_rx) = tokio::sync::mpsc::unbounded_channel::<AttachRequest>();
 
     let known_pids: Arc<std::sync::RwLock<HashSet<u32>>> =
@@ -894,8 +848,6 @@ async fn main() -> Result<()> {
         let mut attached_nvtx: HashSet<DevInode> = HashSet::new();
         let mut iteration: u64 = 0;
         loop {
-            // Every 6th iteration (~60s with 10s interval) do a full /proc scan;
-            // otherwise only scan known PIDs.
             let only_pids = if iteration.is_multiple_of(6) {
                 None
             } else {
@@ -938,7 +890,7 @@ async fn main() -> Result<()> {
                         })
                         .is_err()
                     {
-                        return; // main task ended
+                        return;
                     }
                 }
             }
@@ -966,7 +918,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    // ── HTTP server ─────────────────────────────────────────────────────
     let reviewer = if args.metrics_security.needs_k8s_client() {
         match kube::Client::try_default().await {
             Ok(client) => {
@@ -999,7 +950,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    // ── NVML ────────────────────────────────────────────────────────────
     if !args.disable_nvml {
         if let Some(mut poller) = profi::nvml::NvmlPoller::new() {
             let nvml_metrics = metrics.clone();
@@ -1016,7 +966,6 @@ async fn main() -> Result<()> {
         info!("NVML disabled via --disable-nvml");
     }
 
-    // ── Symbol resolution thread (full mode only) ──────────────────────
     let (sym_tx, mut sym_result_rx) = if kernel_mode == KernelMode::Full {
         let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<symbols::SymRequest>();
         let (res_tx, res_rx) = tokio::sync::mpsc::unbounded_channel::<(u32, u64, String)>();
@@ -1040,9 +989,6 @@ async fn main() -> Result<()> {
         (None, None)
     };
 
-    // ── RingBuffer ──────────────────────────────────────────────────────
-    // One builder with up to 2 ringbuf maps registered; the returned Ring
-    // exposes a single epoll fd we feed into tokio::io::unix::AsyncFd.
     let events_queue: Rc<RefCell<Vec<CudaEvent>>> = Rc::new(RefCell::new(Vec::with_capacity(
         RINGBUF_EVENTS_QUEUE_CAPACITY,
     )));
@@ -1083,7 +1029,6 @@ async fn main() -> Result<()> {
         .context("wrap ring epoll fd in AsyncFd")?;
     app_state.ring_buffer_open.store(true, Ordering::Relaxed);
 
-    // ── Event loop state ────────────────────────────────────────────────
     let proc_path = args.proc_path.clone();
     let cardinality_limits = CardinalityLimits {
         max_time_series: args.max_time_series,
@@ -1143,7 +1088,6 @@ async fn main() -> Result<()> {
         None
     };
 
-    // ── Main event loop ────────────────────────────────────────────────
     loop {
         app_state.heartbeat_ns.store(
             app_state.start_time.elapsed().as_nanos() as u64,
@@ -1151,14 +1095,12 @@ async fn main() -> Result<()> {
         );
 
         tokio::select! {
-            // Ring buffer readable — consume a bounded batch, then process queued events.
             guard_result = async_fd.readable() => {
                 let mut guard = match guard_result {
                     Ok(g) => g,
                     Err(e) => { warn!("ring buffer poll error: {e}"); break; }
                 };
 
-                // PID invalidation on enrichment changes
                 if enricher_reader.has_changes.load(Ordering::Relaxed) {
                     let mut changed = enricher_reader.changed_pids.lock().unwrap();
                     if !changed.is_empty() {
@@ -1249,7 +1191,6 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                // Drain KERNEL_REGS (full mode only)
                 if kernel_mode == KernelMode::Full {
                     for reg in kreg_queue.borrow_mut().drain(..) {
                         if kernel_names.contains_key(&(reg.pid, reg.host_fun)) {
@@ -1276,7 +1217,6 @@ async fn main() -> Result<()> {
                 guard.clear_ready();
             }
 
-            // Discovery thread asked us to attach probes to a newly-found library.
             Some(req) = attach_rx.recv() => {
                 if req.lib == "libnccl.so" {
                     match attach_nccl_probes_multi(&mut skel, &mut attached_links, &req.host_path, pid) {
@@ -1317,11 +1257,9 @@ async fn main() -> Result<()> {
                 let _ = req.devinode; // retained for future per-lib accounting
             }
 
-            // Periodic: drain aggregation maps, update gauges.
             _ = agg_interval.tick() => {
                 let agg_start = Instant::now();
 
-                // UPGRADED_PIDS: full-replace sync when dirty.
                 if enricher_reader.upgrade_dirty.swap(false, Ordering::AcqRel) {
                     let desired: HashSet<u32> = enricher_reader
                         .upgraded_pids
@@ -1360,7 +1298,6 @@ async fn main() -> Result<()> {
                     );
                 }
 
-                // LAUNCH_DROPPED counter
                 if let Some(total) = read_percpu_counter(&skel.maps.LAUNCH_DROPPED) {
                     let delta = total.saturating_sub(last_launch_dropped);
                     if delta > 0 {
@@ -1369,7 +1306,6 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                // DROPPED ringbuf-overflow counter + adaptive drain
                 if let Some(total) = read_percpu_counter(&skel.maps.DROPPED) {
                     let delta = total.saturating_sub(last_dropped_total);
                     if delta > 0 {
@@ -1403,7 +1339,6 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                // Drain AGGREGATED (PerCpuHashMap<AggKey, AggValue>)
                 let mut active_mem_delta: HashMap<u32, i64> = HashMap::new();
                 if let Err(e) = drain_percpu_hash::<AggValue, _>(&skel.maps.AGGREGATED, |key_bytes, per_cpu| {
                     if key_bytes.len() != std::mem::size_of::<AggKey>() { return Ok(()); }
@@ -1493,7 +1428,6 @@ async fn main() -> Result<()> {
                     warn!("drain AGGREGATED: {e}");
                 }
 
-                // Drain LAUNCH_AGG (skip when --detailed-launches, which ships via ringbuf)
                 if !args.detailed_launches {
                     if let Err(e) = drain_percpu_hash::<LaunchAggValue, _>(&skel.maps.LAUNCH_AGG, |key_bytes, per_cpu| {
                         if key_bytes.len() != std::mem::size_of::<LaunchKey>() { return Ok(()); }
@@ -1587,7 +1521,6 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                // Drain NCCL_AGG
                 if let Err(e) = drain_percpu_hash::<NcclAggValue, _>(&skel.maps.NCCL_AGG, |key_bytes, per_cpu| {
                     if key_bytes.len() != std::mem::size_of::<AggKey>() { return Ok(()); }
                     let key = unsafe { std::ptr::read_unaligned(key_bytes.as_ptr() as *const AggKey) };
@@ -1667,7 +1600,6 @@ async fn main() -> Result<()> {
                     warn!("drain NCCL_AGG: {e}");
                 }
 
-                // Active memory gauge
                 for (pid_k, delta) in active_mem_delta {
                     let bytes = active_memory.entry(pid_k).or_insert(0);
                     *bytes += delta;
@@ -1690,7 +1622,6 @@ async fn main() -> Result<()> {
                 metrics_reader.uptime.set(app_state.start_time.elapsed().as_secs_f64());
             }
 
-            // Periodic: GC stale PIDs, straggler detection, NCCL hang scan.
             _ = gc_interval.tick() => {
                 if let Some(ref mut rx) = sym_result_rx {
                     while let Ok((pid_k, addr, name)) = rx.try_recv() {
@@ -1721,7 +1652,6 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                // NCCL hang detection via INFLIGHT scan
                 if nccl_hang_timeout_ns > 0 {
                     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
                     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
@@ -1756,7 +1686,6 @@ async fn main() -> Result<()> {
                     metrics_reader.nccl_stale_entries.set(stale_count);
                 }
 
-                // Straggler detection
                 if !nccl_durations.is_empty() {
                     let mut per_op: FxHashMap<u32, Vec<(u32, u64)>> = FxHashMap::default();
                     for (&(pid_k, event_type), window) in &nccl_durations {
@@ -1797,7 +1726,6 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Periodic report printout
             _ = async {
                 match report_interval.as_mut() {
                     Some(i) => { i.tick().await; }

@@ -19,8 +19,6 @@ use crate::metrics::{
 
 pub type MetricKey = (u32, u32, u32, u32, u64, u64, u64);
 
-// ── Cardinality Limits ──────────────────────────────────────────────────────
-
 pub struct CardinalityLimits {
     pub max_time_series: usize,
     pub max_streams_per_pid: usize,
@@ -37,10 +35,6 @@ impl Default for CardinalityLimits {
     }
 }
 
-// ── Metric Handle Cache ─────────────────────────────────────────────────────
-// Caches prometheus Counter/Histogram handles to avoid per-event
-// with_label_values() overhead (hash + RwLock + HashMap lookup).
-
 pub struct CachedHandles {
     pub calls: prometheus::Counter,
     pub duration: prometheus::Histogram,
@@ -50,7 +44,6 @@ pub struct CachedHandles {
     pub kernel_counter: Option<prometheus::Counter>,
     pub kernel_histogram: Option<prometheus::Histogram>,
     pub errors_counter: Option<prometheus::Counter>,
-    // Stored label values as interned Spurs — resolved only during GC/invalidation (Fix 1)
     pub calls_labels: ArrayVec<Spur, 9>,
     pub hist_labels: ArrayVec<Spur, 9>,
     pub memcpy_labels: Option<ArrayVec<Spur, 9>>,
@@ -62,15 +55,9 @@ pub struct CachedHandles {
 }
 
 pub struct MetricHandleCache {
-    /// Key: (event_type, pid, memcpy_kind, error_code, stream, addr, nvtx_hash)
-    /// addr is non-zero only for EVENT_CUDA_LAUNCH_KERNEL (per-kernel cached handles)
-    /// nvtx_hash distinguishes NVTX phases for kernel metrics
     pub handles: FxHashMap<MetricKey, CachedHandles>,
-    /// PID -> last event timestamp (for GC)
     pub last_seen: FxHashMap<u32, Instant>,
-    /// PID -> number of distinct streams seen (for cardinality limiting)
     streams_per_pid: FxHashMap<u32, FxHashMap<u64, ()>>,
-    /// PID -> number of distinct kernel addresses seen (for cardinality limiting)
     kernels_per_pid: FxHashMap<u32, FxHashMap<u64, ()>>,
 }
 
@@ -101,26 +88,23 @@ impl MetricHandleCache {
         proc_path: &str,
         limits: &CardinalityLimits,
     ) -> &CachedHandles {
-        // Apply cardinality limits by collapsing stream/kernel to "other" bucket
         let key = {
             let (event_type, pid, memcpy_kind, error_code, stream, addr, nvtx_key) = key;
 
-            // Collapse streams: if PID has too many distinct streams, map to stream=0 ("default")
             let stream = if stream != 0 {
                 let pid_streams = self.streams_per_pid.entry(pid).or_default();
                 if pid_streams.contains_key(&stream) {
-                    stream // already tracked
+                    stream
                 } else if pid_streams.len() < limits.max_streams_per_pid {
                     pid_streams.insert(stream, ());
                     stream
                 } else {
-                    0 // collapse to "default"
+                    0
                 }
             } else {
                 stream
             };
 
-            // Collapse kernel addrs: if PID has too many distinct kernels, map addr to 0
             let addr = if addr != 0 && event_type == EVENT_CUDA_LAUNCH_KERNEL {
                 let pid_kernels = self.kernels_per_pid.entry(pid).or_default();
                 if pid_kernels.contains_key(&addr) {
@@ -129,7 +113,7 @@ impl MetricHandleCache {
                     pid_kernels.insert(addr, ());
                     addr
                 } else {
-                    0 // collapse to addr=0 ("unknown" kernel)
+                    0
                 }
             } else {
                 addr
@@ -166,11 +150,9 @@ impl MetricHandleCache {
 
             let (event_type, _pid, memcpy_kind, error_code, stream, addr, _nvtx_key) = key;
 
-            // Parse comm from [u8; 16] — zero-alloc &str, resolve via interner
             let comm_len = event.comm.iter().position(|&c| c == 0).unwrap_or(16);
             let mut comm_str = std::str::from_utf8(&event.comm[..comm_len]).unwrap_or("unknown");
 
-            // Fallback: read from /proc if eBPF sent empty comm (aggregated events)
             let proc_comm;
             if comm_str.is_empty() {
                 let path = format!("{}/{}/comm", proc_path, event.pid);
@@ -185,7 +167,6 @@ impl MetricHandleCache {
             let labels = enricher.lookup(event.pid, comm_str);
             let r = &enricher.interner;
 
-            // Intern pid and stream too — everything becomes Spur (Fix 1)
             let pid_s = event.pid.to_string();
             let pid_spur = r.get_or_intern(&pid_s);
             let op: Cow<'static, str> = Cow::Borrowed(operation_name(event_type));
@@ -193,7 +174,6 @@ impl MetricHandleCache {
             let stream_s = stream_label(stream);
             let stream_spur = r.get_or_intern(stream_s.as_ref());
 
-            // Resolve Spurs to &str for with_label_values() (lock-free concurrent read)
             let comm = r.resolve(&labels.comm);
             let namespace = r.resolve(&labels.namespace);
             let pod = r.resolve(&labels.pod);
@@ -202,7 +182,6 @@ impl MetricHandleCache {
             let gpu_uuid = r.resolve(&labels.gpu_uuid);
 
             if is_nccl_event(event_type) {
-                // NCCL counter: full labels (no stream)
                 let calls_refs = [
                     op.as_ref(),
                     pid_s.as_str(),
@@ -225,17 +204,14 @@ impl MetricHandleCache {
                     labels.gpu_uuid,
                 ]);
 
-                // NCCL histogram: reduced labels
                 let hist_refs = [op.as_ref(), namespace, pod, gpu];
                 let duration = metrics.nccl_duration.with_label_values(&hist_refs);
                 let hist_labels: ArrayVec<Spur, 9> =
                     ArrayVec::from_iter([op_spur, labels.namespace, labels.pod, labels.gpu]);
 
-                // NCCL bytes counter (same labels as calls)
                 let nccl_bytes = metrics.nccl_bytes.with_label_values(&calls_refs);
                 let nccl_bytes_labels = calls_labels.clone();
 
-                // Error counter (only when error_code != 0)
                 let (errors_counter, errors_labels) = if error_code != 0 {
                     let ec_s = error_code.to_string();
                     let ec_spur = r.get_or_intern(&ec_s);
@@ -291,7 +267,6 @@ impl MetricHandleCache {
                     },
                 );
             } else {
-                // CUDA counter: full labels (with stream)
                 let calls_refs = [
                     op.as_ref(),
                     pid_s.as_str(),
@@ -316,13 +291,11 @@ impl MetricHandleCache {
                     stream_spur,
                 ]);
 
-                // Histogram: reduced labels (no stream)
                 let hist_refs = [op.as_ref(), namespace, pod, gpu];
                 let duration = metrics.cuda_duration.with_label_values(&hist_refs);
                 let hist_labels: ArrayVec<Spur, 9> =
                     ArrayVec::from_iter([op_spur, labels.namespace, labels.pod, labels.gpu]);
 
-                // Memcpy/Memset counter (bytes transferred, with stream)
                 let (memcpy_bytes, memcpy_labels) = if event_type == EVENT_CUDA_MEMCPY
                     || event_type == EVENT_CUDA_MEMCPY_ASYNC
                     || event_type == EVENT_CUDA_MEMSET
@@ -360,7 +333,6 @@ impl MetricHandleCache {
                     (None, None)
                 };
 
-                // Malloc counter (no stream — not relevant)
                 let (malloc_bytes, malloc_labels) =
                     if event_type == EVENT_CUDA_MALLOC || event_type == EVENT_CUDA_MALLOC_HOST {
                         let ml_refs = [
@@ -389,9 +361,6 @@ impl MetricHandleCache {
                         (None, None)
                     };
 
-                // Kernel metrics for cudaLaunchKernel. addr==0 occurs in anonymous-mode
-                // AGGREGATED drain path (no per-kernel identity): emit under kernel_name="aggregated"
-                // so dashboards still see non-empty profi_cuda_kernel_launches_total.
                 let (kernel_counter, kernel_histogram, kernel_counter_labels, kernel_hist_labels) =
                     if event_type == EVENT_CUDA_LAUNCH_KERNEL {
                         let kernel_name: Cow<'_, str> = if addr != 0 {
@@ -406,7 +375,6 @@ impl MetricHandleCache {
                         let kernel_class = classify_kernel(kernel_name.as_ref());
                         let class_spur = r.get_or_intern_static(kernel_class);
 
-                        // Extract and sanitize NVTX phase from event
                         let phase_len =
                             event.nvtx_marker.iter().position(|&c| c == 0).unwrap_or(16);
                         let phase_raw =
@@ -467,7 +435,6 @@ impl MetricHandleCache {
                         (None, None, None, None)
                     };
 
-                // Error counter (only when error_code != 0)
                 let (errors_counter, errors_labels) = if error_code != 0 {
                     let ec_s = error_code.to_string();
                     let ec_spur = r.get_or_intern(&ec_s);
@@ -531,7 +498,6 @@ impl MetricHandleCache {
         self.last_seen.insert(pid, Instant::now());
     }
 
-    /// Remove cached handles for specific PIDs and their prometheus time series.
     pub fn invalidate_pids(
         &mut self,
         pids: &HashSet<u32>,
@@ -553,7 +519,6 @@ impl MetricHandleCache {
         }
     }
 
-    /// Remove stale PIDs that are no longer running. Returns evicted PIDs.
     pub fn gc(
         &mut self,
         metrics: &Metrics,
@@ -569,7 +534,6 @@ impl MetricHandleCache {
             .collect();
 
         for pid in &stale_pids {
-            // Remove all handle entries for this PID
             let keys_to_remove: Vec<_> = self
                 .handles
                 .keys()
@@ -599,8 +563,6 @@ impl MetricHandleCache {
     }
 }
 
-/// Remove all prometheus time series associated with a cached handle entry.
-/// Resolves Spur->str via the interner only here (GC/invalidation path, not hot path).
 fn remove_handle_metrics(
     metrics: &Metrics,
     event_type: u32,

@@ -12,8 +12,6 @@ use lasso::{Spur, ThreadedRodeo};
 
 use log::{info, warn};
 
-// ── Public types ────────────────────────────────────────────────────────────
-
 #[derive(Clone, Copy)]
 pub struct Labels {
     pub comm: Spur,
@@ -47,8 +45,6 @@ struct PodInfo {
 /// cluster-wide `--kernel-mode` setting.
 const MODE_ANNOTATION: &str = "profi/mode";
 
-// ── Enricher ────────────────────────────────────────────────────────────────
-
 pub struct Enricher {
     proc_path: String,
     k8s_pid_cache: RwLock<HashMap<u32, Option<PodInfo>>>,
@@ -56,20 +52,15 @@ pub struct Enricher {
     container_map: ArcSwap<HashMap<String, PodInfo>>,
     pub gpu_devices: Vec<GpuDevice>,
     minor_to_gpu: HashMap<u32, GpuDevice>,
-    /// Set of PIDs whose K8s labels changed and need metric handle re-creation.
     pub changed_pids: Arc<std::sync::Mutex<HashSet<u32>>>,
-    /// Atomic flag: true when changed_pids is non-empty (Fix 2 — avoids Mutex on hot path).
     pub has_changes: AtomicBool,
-    /// Reverse index: container_id → set of PIDs resolved to that container.
     container_to_pids: RwLock<HashMap<String, HashSet<u32>>>,
     /// PIDs currently promoted to full kernel tracing via
     /// `profi/mode: full` pod annotation. Ground truth for the
     /// `UPGRADED_PIDS` eBPF map; main.rs drains this set periodically and
     /// replaces the map contents.
     pub upgraded_pids: RwLock<HashSet<u32>>,
-    /// Set when `upgraded_pids` has changed since the last sync to eBPF.
     pub upgrade_dirty: AtomicBool,
-    /// String interner — thread-safe concurrent reads and writes.
     pub interner: ThreadedRodeo,
 }
 
@@ -101,7 +92,6 @@ impl Enricher {
         })
     }
 
-    /// Resolve labels for a PID. Called once per PID on metric handle cache miss.
     pub fn lookup(&self, pid: u32, comm: &str) -> Labels {
         let k8s = self.resolve_k8s(pid);
         let gpu = self.resolve_gpu(pid);
@@ -128,7 +118,6 @@ impl Enricher {
         }
     }
 
-    /// Evict a specific PID from all caches.
     pub fn evict_pid(&self, pid: u32) {
         self.k8s_pid_cache.write().unwrap().remove(&pid);
         self.gpu_pid_cache.write().unwrap().remove(&pid);
@@ -136,8 +125,6 @@ impl Enricher {
             self.upgrade_dirty.store(true, Ordering::Release);
         }
     }
-
-    // ── K8s pod resolution ──────────────────────────────────────────────
 
     fn resolve_k8s(&self, pid: u32) -> Option<PodInfo> {
         if let Some(cached) = self.k8s_pid_cache.read().unwrap().get(&pid) {
@@ -153,7 +140,6 @@ impl Enricher {
             map.get(id).cloned()
         });
 
-        // Populate reverse index: container_id → PIDs
         if let Some(cid) = container_id {
             self.container_to_pids
                 .write()
@@ -179,9 +165,6 @@ impl Enricher {
         result
     }
 
-    // ── Background refresh: K8s pods (watch-based) ────────────────────
-
-    /// Find PIDs affected by changed container IDs and mark them for invalidation.
     fn invalidate_containers(&self, container_ids: &[String]) {
         if container_ids.is_empty() {
             return;
@@ -196,7 +179,6 @@ impl Enricher {
         drop(c2p);
 
         if !affected_pids.is_empty() {
-            // Clear from k8s_pid_cache so next lookup re-resolves
             let mut pid_cache = self.k8s_pid_cache.write().unwrap();
             for pid in &affected_pids {
                 pid_cache.remove(pid);
@@ -218,7 +200,6 @@ impl Enricher {
                 }
             }
 
-            // Signal to the event loop
             let mut changed = self.changed_pids.lock().unwrap();
             changed.extend(affected_pids);
             self.has_changes.store(true, Ordering::Release);
@@ -251,19 +232,15 @@ impl Enricher {
                 match stream.try_next().await {
                     Ok(Some(event)) => match event {
                         Event::Init => {
-                            // Start of initial list — clear pending
                             pending_map.clear();
                         }
                         Event::InitApply(pod) => {
-                            // Buffer pod containers during init
                             let containers = extract_containers_from_pod(&pod);
                             pending_map.extend(containers);
                         }
                         Event::InitDone => {
-                            // Swap container_map with pending, invalidate removed containers
                             let old_map =
                                 enricher.container_map.swap(Arc::new(pending_map.clone()));
-                            // Find removed container IDs
                             let removed: Vec<String> = old_map
                                 .keys()
                                 .filter(|k| !pending_map.contains_key(*k))
@@ -271,7 +248,6 @@ impl Enricher {
                                 .collect();
                             enricher.invalidate_containers(&removed);
 
-                            // Also invalidate negative cache entries (PIDs that had no container before)
                             {
                                 let mut pid_cache = enricher.k8s_pid_cache.write().unwrap();
                                 pid_cache.retain(|_, v| v.is_some());
@@ -284,12 +260,10 @@ impl Enricher {
                             pending_map.clear();
                         }
                         Event::Apply(pod) => {
-                            // Pod updated — update container_map for this pod
                             let new_containers = extract_containers_from_pod(&pod);
                             let pod_name = pod.metadata.name.unwrap_or_default();
                             let pod_ns = pod.metadata.namespace.unwrap_or_default();
 
-                            // Find old container IDs that belonged to this pod
                             let old_cids: Vec<String> = {
                                 let map = enricher.container_map.load();
                                 map.iter()
@@ -300,7 +274,6 @@ impl Enricher {
                                     .collect()
                             };
 
-                            // Update container_map via rcu
                             let old_cids_clone = old_cids.clone();
                             enricher.container_map.rcu(move |old| {
                                 let mut new = (**old).clone();
@@ -311,11 +284,9 @@ impl Enricher {
                                 new
                             });
 
-                            // Invalidate old container PIDs
                             enricher.invalidate_containers(&old_cids);
                         }
                         Event::Delete(pod) => {
-                            // Pod deleted — remove its containers
                             let pod_name = pod.metadata.name.unwrap_or_default();
                             let pod_ns = pod.metadata.namespace.unwrap_or_default();
 
@@ -349,18 +320,13 @@ impl Enricher {
                     }
                     Err(e) => {
                         warn!("K8s watch error: {e}");
-                        // The default_backoff() will handle reconnection
                     }
                 }
             }
         });
     }
 
-    // ── Lazy GPU resolution (per-PID on demand) ─────────────────────────
-
-    /// Resolve the GPU device for a PID. Results (including negative) are cached.
     fn resolve_gpu(&self, pid: u32) -> Option<GpuDevice> {
-        // Check cache first (including negative entries)
         if let Some(cached) = self.gpu_pid_cache.read().unwrap().get(&pid) {
             return cached.clone();
         }
@@ -378,8 +344,6 @@ impl Enricher {
         result
     }
 }
-
-// ── K8s pod helpers ───────────────────────────────────────────────────────
 
 fn extract_containers_from_pod(pod: &k8s_openapi::api::core::v1::Pod) -> HashMap<String, PodInfo> {
     let mut map = HashMap::new();
@@ -416,9 +380,6 @@ fn extract_containers_from_pod(pod: &k8s_openapi::api::core::v1::Pod) -> HashMap
     map
 }
 
-// ── Procfs GPU helpers ─────────────────────────────────────────────────────
-
-/// Parse /proc/driver/nvidia/gpus/*/information to discover GPU devices.
 fn discover_gpu_devices(proc_path: &str) -> Vec<GpuDevice> {
     let gpu_dir = format!("{proc_path}/driver/nvidia/gpus");
     let entries = match std::fs::read_dir(&gpu_dir) {
@@ -461,8 +422,6 @@ fn discover_gpu_devices(proc_path: &str) -> Vec<GpuDevice> {
     devices
 }
 
-/// Resolve the GPU device for a single PID by scanning its /proc/<pid>/fd/ symlinks.
-/// Counts fds per device — primary compute GPU has more fds than P2P devices.
 fn resolve_pid_gpu(
     proc_path: &str,
     pid: u32,
@@ -495,8 +454,6 @@ fn resolve_pid_gpu(
         .max_by(|a, b| a.1.cmp(b.1).then(a.0.cmp(b.0)))
         .and_then(|(&minor, _)| minor_to_gpu.get(&minor).cloned())
 }
-
-// ── Cgroup parsing helpers ──────────────────────────────────────────────────
 
 fn extract_container_id(cgroup: &str) -> Option<String> {
     for line in cgroup.lines() {
@@ -541,8 +498,6 @@ fn short_container_id(full_id: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── extract_container_id ────────────────────────────────────────────
 
     #[test]
     fn extract_containerd() {
@@ -594,7 +549,6 @@ mod tests {
 
     #[test]
     fn extract_non_hex_no_match() {
-        // Last segment is 64 chars but not all hex
         let id = format!("{}zzzz", "a".repeat(60));
         let cgroup = format!("0::/kubepods/{id}");
         assert_eq!(extract_container_id(&cgroup), None);
@@ -609,8 +563,6 @@ mod tests {
             Some("aaaaaaaaaaaa".to_string())
         );
     }
-
-    // ── short_container_id ──────────────────────────────────────────────
 
     #[test]
     fn short_containerd_protocol() {
@@ -632,8 +584,6 @@ mod tests {
             Some("abcdef012345".to_string())
         );
     }
-
-    // ── annotation-driven upgrade ───────────────────────────────────────
 
     fn pod_with_annotation(
         value: Option<&str>,

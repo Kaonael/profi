@@ -16,8 +16,6 @@ use rustc_hash::FxHashMap;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-// ── Simulate core data structures ──────────────────────────────────────────
-
 const COUNTER_LABELS: &[&str] = &[
     "operation",
     "pid",
@@ -49,7 +47,6 @@ fn setup_metrics() -> (Registry, CounterVec, HistogramVec) {
 
 fn setup_interner() -> ThreadedRodeo {
     let interner = ThreadedRodeo::default();
-    // Pre-intern common values
     interner.get_or_intern("cudaLaunchKernel");
     interner.get_or_intern("cudaMemcpyAsync");
     interner.get_or_intern("default");
@@ -63,13 +60,9 @@ fn setup_interner() -> ThreadedRodeo {
     interner
 }
 
-// ── Benchmarks ─────────────────────────────────────────────────────────────
-
-/// Benchmark: cache hit path (HashMap lookup + Counter::inc + Histogram::observe)
 fn bench_cache_hit(c: &mut Criterion) {
     let (_registry, counter, histogram) = setup_metrics();
 
-    // Pre-create a cached handle (simulates cache hit)
     let cached_counter = counter.with_label_values(&[
         "cudaLaunchKernel",
         "12345",
@@ -84,23 +77,18 @@ fn bench_cache_hit(c: &mut Criterion) {
     let cached_histogram =
         histogram.with_label_values(&["cudaLaunchKernel", "default", "my-pod", "7"]);
 
-    // Simulate cache key lookup
     let mut handles: HashMap<(u32, u32, u32, u64, u64), usize> = HashMap::new();
     handles.insert((4, 12345, 0, 0, 0x1234), 0);
 
     c.bench_function("cache_hit_full", |b| {
         b.iter(|| {
-            // 1. HashMap lookup (cache hit)
             let _idx = handles.get(&black_box((4, 12345, 0, 0, 0x1234)));
-            // 2. Counter inc (atomic)
             cached_counter.inc();
-            // 3. Histogram observe (atomic)
             cached_histogram.observe(black_box(0.000005));
         })
     });
 }
 
-/// Benchmark: Spur interning (get_or_intern for existing string)
 fn bench_spur_intern_hit(c: &mut Criterion) {
     let interner = setup_interner();
 
@@ -111,7 +99,6 @@ fn bench_spur_intern_hit(c: &mut Criterion) {
     });
 }
 
-/// Benchmark: Spur resolve (Spur → &str)
 fn bench_spur_resolve(c: &mut Criterion) {
     let interner = setup_interner();
     let spur = interner.get_or_intern("my-namespace");
@@ -123,7 +110,6 @@ fn bench_spur_resolve(c: &mut Criterion) {
     });
 }
 
-/// Benchmark: cache miss path — label construction with Spur (current optimized)
 fn bench_cache_miss_spur(c: &mut Criterion) {
     let (_registry, counter, histogram) = setup_metrics();
     let interner = setup_interner();
@@ -140,7 +126,6 @@ fn bench_cache_miss_spur(c: &mut Criterion) {
 
     c.bench_function("cache_miss_spur_labels", |b| {
         b.iter(|| {
-            // Resolve spurs to &str (what happens on cache miss)
             let labels: [&str; 9] = [
                 interner.resolve(&op),
                 interner.resolve(&pid),
@@ -165,13 +150,11 @@ fn bench_cache_miss_spur(c: &mut Criterion) {
     });
 }
 
-/// Benchmark: cache miss path — label construction with String (old approach, for comparison)
 fn bench_cache_miss_string(c: &mut Criterion) {
     let (_registry, counter, histogram) = setup_metrics();
 
     c.bench_function("cache_miss_string_labels", |b| {
         b.iter(|| {
-            // Old approach: allocate Strings for every label
             let op = "cudaLaunchKernel".to_string();
             let pid = 12345u32.to_string();
             let comm = "vllm".to_string();
@@ -196,7 +179,6 @@ fn bench_cache_miss_string(c: &mut Criterion) {
     });
 }
 
-/// Benchmark: stream_label() — Cow vs String
 fn bench_stream_label(c: &mut Criterion) {
     let mut group = c.benchmark_group("stream_label");
 
@@ -234,7 +216,6 @@ fn bench_stream_label(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark: ArrayVec vs Vec for label refs
 fn bench_label_refs(c: &mut Criterion) {
     let labels = [
         "cudaLaunchKernel",
@@ -267,7 +248,6 @@ fn bench_label_refs(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark: HashMap lookup (simulates cache key lookup)
 fn bench_hashmap_lookup(c: &mut Criterion) {
     let mut group = c.benchmark_group("cache_key_lookup");
 
@@ -290,7 +270,6 @@ fn bench_hashmap_lookup(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark: throughput — events per second simulation
 fn bench_throughput(c: &mut Criterion) {
     let (_registry, counter, histogram) = setup_metrics();
 
@@ -359,7 +338,6 @@ fn populate_registry(series: usize) -> (Registry, CounterVec, HistogramVec) {
     (registry, counter, histogram)
 }
 
-/// Benchmark: Prometheus encode (metrics scrape)
 fn bench_encode(c: &mut Criterion) {
     let (registry, _counter, _histogram) = populate_registry(50);
 
@@ -407,7 +385,6 @@ fn bench_otlp_convert(c: &mut Criterion) {
         let (registry, _counter, _histogram) = populate_registry(series);
         group.throughput(Throughput::Elements(series as u64));
 
-        // Full scrape: gather + filter profi_system_* self-obs + convert every family.
         group.bench_with_input(
             BenchmarkId::new("gather_filter_convert", series),
             &registry,

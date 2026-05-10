@@ -155,8 +155,6 @@ struct {
     __type(value, __u64);
 } MALLOC_PTRS SEC(".maps");
 
-/* ── Helpers ───────────────────────────────────────────────────────────── */
-
 static __always_inline __u32 cfg_u32(void *map)
 {
     __u32 zero = 0;
@@ -172,7 +170,6 @@ static __always_inline void save_entry(__u32 event_type, __u64 arg0, __u64 arg1,
      * (e.g. cudaLaunchKernel → cuLaunchKernel). Skip inner. */
     if (bpf_map_lookup_elem(&INFLIGHT, &key)) return;
 
-    /* Sampling: only for aggregatable events. */
     if (profi_is_aggregatable(event_type)) {
         __u32 rate = cfg_u32(&SAMPLE_RATE);
         if (rate > 1) {
@@ -218,7 +215,6 @@ static __always_inline int emit_exit(struct pt_regs *ctx)
     __u64 now = bpf_ktime_get_ns();
     __u64 duration_ns = now > entry.timestamp_ns ? now - entry.timestamp_ns : 0;
 
-    /* Aggregatable CUDA events: in-kernel AGGREGATED map, no ringbuf. */
     if (profi_is_aggregatable(entry.event_type)) {
         __u64 sample_mul = 1;
         __u32 rate = cfg_u32(&SAMPLE_RATE);
@@ -254,12 +250,11 @@ static __always_inline int emit_exit(struct pt_regs *ctx)
         return 0;
     }
 
-    /* NCCL collectives: NCCL_AGG with inline bucket histogram. */
     if (profi_is_nccl_event(entry.event_type)) {
         struct AggKey key = {
             .event_type = entry.event_type,
             .pid = pid,
-            .memcpy_kind = (__u32)entry.arg1, /* NCCL datatype */
+            .memcpy_kind = (__u32)entry.arg1,
             .error_code = rc,
             .stream = 0,
         };
@@ -328,10 +323,8 @@ static __always_inline int emit_exit(struct pt_regs *ctx)
             bpf_map_delete_elem(&INFLIGHT, &id);
             return 0;
         }
-        /* Full mode + detailed: fall through to ringbuf emit below. */
     }
 
-    /* Full-mode ringbuf emit. */
     struct CudaEvent *evt = bpf_ringbuf_reserve(&EVENTS, sizeof(*evt), 0);
     if (!evt) {
         bump_dropped(&DROPPED);
@@ -353,7 +346,6 @@ static __always_inline int emit_exit(struct pt_regs *ctx)
 
     bpf_get_current_comm(&evt->comm, sizeof(evt->comm));
 
-    /* NVTX marker lookup — zero-init then overwrite if present. */
     __builtin_memset(&evt->nvtx_marker, 0, sizeof(evt->nvtx_marker));
     struct nvtx_name_t *marker = bpf_map_lookup_elem(&NVTX_STACK, &id);
     if (marker) {
@@ -365,9 +357,6 @@ static __always_inline int emit_exit(struct pt_regs *ctx)
     return 0;
 }
 
-/* ── Uprobe handlers ─────────────────────────────────────────────────── */
-
-/* cudaMalloc(void **devPtr, size_t size) */
 SEC("uprobe/cuda_malloc")
 int BPF_KPROBE(cuda_malloc, void *ptr_to_ptr, __u64 size)
 {
@@ -401,7 +390,6 @@ int BPF_KRETPROBE(cuda_malloc_ret)
     return emit_exit(ctx);
 }
 
-/* cudaFree(void *devPtr) */
 SEC("uprobe/cuda_free")
 int BPF_KPROBE(cuda_free, void *ptr)
 {
@@ -426,7 +414,6 @@ int BPF_KRETPROBE(cuda_free_ret)
     return emit_exit(ctx);
 }
 
-/* cudaMemcpy(void *dst, const void *src, size_t count, cudaMemcpyKind kind) */
 SEC("uprobe/cuda_memcpy")
 int BPF_KPROBE(cuda_memcpy, void *dst, void *src, __u64 count, __u64 kind)
 {
@@ -440,7 +427,6 @@ int BPF_KRETPROBE(cuda_memcpy_ret)
     return emit_exit(ctx);
 }
 
-/* cudaMemcpyAsync(dst, src, count, kind, stream) */
 SEC("uprobe/cuda_memcpy_async")
 int BPF_KPROBE(cuda_memcpy_async, void *dst, void *src, __u64 count, __u64 kind, __u64 stream)
 {
@@ -454,7 +440,6 @@ int BPF_KRETPROBE(cuda_memcpy_async_ret)
     return emit_exit(ctx);
 }
 
-/* cudaLaunchKernel(const void *func, ...) */
 SEC("uprobe/cuda_launch_kernel")
 int BPF_KPROBE(cuda_launch_kernel, void *func)
 {
@@ -468,7 +453,6 @@ int BPF_KRETPROBE(cuda_launch_kernel_ret)
     return emit_exit(ctx);
 }
 
-/* cudaMallocAsync(void **devPtr, size_t size, cudaStream_t stream) */
 SEC("uprobe/cuda_malloc_async")
 int BPF_KPROBE(cuda_malloc_async, void *ptr_to_ptr, __u64 size, __u64 stream)
 {
@@ -502,7 +486,6 @@ int BPF_KRETPROBE(cuda_malloc_async_ret)
     return emit_exit(ctx);
 }
 
-/* cudaFreeAsync(void *devPtr, cudaStream_t stream) */
 SEC("uprobe/cuda_free_async")
 int BPF_KPROBE(cuda_free_async, void *ptr, __u64 stream)
 {
@@ -596,7 +579,6 @@ int BPF_KRETPROBE(cu_module_get_function_ret)
     return 0;
 }
 
-/* cuLaunchKernel(CUfunction f, ...) */
 SEC("uprobe/cu_launch_kernel")
 int BPF_KPROBE(cu_launch_kernel, void *func)
 {
@@ -642,7 +624,6 @@ int BPF_KRETPROBE(cu_launch_cooperative_kernel_ret)
     return emit_exit(ctx);
 }
 
-/* cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream) */
 SEC("uprobe/cu_graph_launch")
 int BPF_KPROBE(cu_graph_launch, void *graph, void *stream)
 {
@@ -656,7 +637,6 @@ int BPF_KRETPROBE(cu_graph_launch_ret)
     return emit_exit(ctx);
 }
 
-/* cudaStreamSynchronize(cudaStream_t stream) */
 SEC("uprobe/cuda_stream_sync")
 int BPF_KPROBE(cuda_stream_sync, void *stream)
 {
@@ -670,7 +650,6 @@ int BPF_KRETPROBE(cuda_stream_sync_ret)
     return emit_exit(ctx);
 }
 
-/* cudaEventSynchronize(cudaEvent_t event) */
 SEC("uprobe/cuda_event_sync")
 int BPF_KPROBE(cuda_event_sync, void *event)
 {
@@ -684,7 +663,6 @@ int BPF_KRETPROBE(cuda_event_sync_ret)
     return emit_exit(ctx);
 }
 
-/* cudaMallocHost(void **ptr, size_t size) */
 SEC("uprobe/cuda_malloc_host")
 int BPF_KPROBE(cuda_malloc_host, void *ptr, __u64 size)
 {
@@ -698,7 +676,6 @@ int BPF_KRETPROBE(cuda_malloc_host_ret)
     return emit_exit(ctx);
 }
 
-/* cudaFreeHost(void *ptr) */
 SEC("uprobe/cuda_free_host")
 int BPF_KPROBE(cuda_free_host, void *ptr)
 {
@@ -712,7 +689,6 @@ int BPF_KRETPROBE(cuda_free_host_ret)
     return emit_exit(ctx);
 }
 
-/* cudaMemset(void *devPtr, int value, size_t count) */
 SEC("uprobe/cuda_memset")
 int BPF_KPROBE(cuda_memset, void *dst, int value, __u64 count)
 {
@@ -726,7 +702,6 @@ int BPF_KRETPROBE(cuda_memset_ret)
     return emit_exit(ctx);
 }
 
-/* cudaMemsetAsync(dst, value, count, stream) */
 SEC("uprobe/cuda_memset_async")
 int BPF_KPROBE(cuda_memset_async, void *dst, int value, __u64 count, __u64 stream)
 {
@@ -740,7 +715,6 @@ int BPF_KRETPROBE(cuda_memset_async_ret)
     return emit_exit(ctx);
 }
 
-/* cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream) */
 SEC("uprobe/cuda_graph_launch")
 int BPF_KPROBE(cuda_graph_launch, void *graph, void *stream)
 {
@@ -754,7 +728,6 @@ int BPF_KRETPROBE(cuda_graph_launch_ret)
     return emit_exit(ctx);
 }
 
-/* cudaGraphInstantiate(...) */
 SEC("uprobe/cuda_graph_instantiate")
 int BPF_KPROBE(cuda_graph_instantiate)
 {
@@ -768,7 +741,6 @@ int BPF_KRETPROBE(cuda_graph_instantiate_ret)
     return emit_exit(ctx);
 }
 
-/* cuModuleLoadData(CUmodule *module, const void *image) */
 SEC("uprobe/cu_module_load_data")
 int BPF_KPROBE(cu_module_load_data)
 {
@@ -782,7 +754,6 @@ int BPF_KRETPROBE(cu_module_load_data_ret)
     return emit_exit(ctx);
 }
 
-/* nvtxRangePushA(const char *message) */
 SEC("uprobe/nvtx_range_push")
 int BPF_KPROBE(nvtx_range_push, void *msg_ptr)
 {
@@ -795,7 +766,6 @@ int BPF_KPROBE(nvtx_range_push, void *msg_ptr)
     return 0;
 }
 
-/* nvtxRangePop() */
 SEC("uprobe/nvtx_range_pop")
 int BPF_KPROBE(nvtx_range_pop)
 {
@@ -803,8 +773,6 @@ int BPF_KPROBE(nvtx_range_pop)
     bpf_map_delete_elem(&NVTX_STACK, &id);
     return 0;
 }
-
-/* ── NCCL collectives ────────────────────────────────────────────────── */
 
 SEC("uprobe.multi/nccl_count_dtype_3_4")
 int BPF_KPROBE(nccl_count_dtype_3_4, void *s, void *r, __u64 count, __u64 datatype)
@@ -828,7 +796,6 @@ int BPF_KRETPROBE(nccl_multi_ret)
     return emit_exit(ctx);
 }
 
-/* ncclAllReduce(send, recv, count, datatype, op, comm, stream) */
 SEC("uprobe/nccl_all_reduce")
 int BPF_KPROBE(nccl_all_reduce, void *s, void *r, __u64 count, __u64 datatype)
 {
@@ -842,7 +809,6 @@ int BPF_KRETPROBE(nccl_all_reduce_ret)
     return emit_exit(ctx);
 }
 
-/* ncclAllGather(send, recv, count, datatype, comm, stream) */
 SEC("uprobe/nccl_all_gather")
 int BPF_KPROBE(nccl_all_gather, void *s, void *r, __u64 count, __u64 datatype)
 {
@@ -856,7 +822,6 @@ int BPF_KRETPROBE(nccl_all_gather_ret)
     return emit_exit(ctx);
 }
 
-/* ncclReduceScatter(send, recv, count, datatype, op, comm, stream) */
 SEC("uprobe/nccl_reduce_scatter")
 int BPF_KPROBE(nccl_reduce_scatter, void *s, void *r, __u64 count, __u64 datatype)
 {
@@ -870,7 +835,6 @@ int BPF_KRETPROBE(nccl_reduce_scatter_ret)
     return emit_exit(ctx);
 }
 
-/* ncclBroadcast(send, recv, count, datatype, root, comm, stream) */
 SEC("uprobe/nccl_broadcast")
 int BPF_KPROBE(nccl_broadcast, void *s, void *r, __u64 count, __u64 datatype)
 {
@@ -884,7 +848,6 @@ int BPF_KRETPROBE(nccl_broadcast_ret)
     return emit_exit(ctx);
 }
 
-/* ncclSend(buff, count, datatype, peer, comm, stream) */
 SEC("uprobe/nccl_send")
 int BPF_KPROBE(nccl_send, void *b, __u64 count, __u64 datatype)
 {
@@ -898,7 +861,6 @@ int BPF_KRETPROBE(nccl_send_ret)
     return emit_exit(ctx);
 }
 
-/* ncclRecv(buff, count, datatype, peer, comm, stream) */
 SEC("uprobe/nccl_recv")
 int BPF_KPROBE(nccl_recv, void *b, __u64 count, __u64 datatype)
 {
